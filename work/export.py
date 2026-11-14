@@ -80,6 +80,16 @@ def docs_plots():
             continue
         xs, _ = sf.read(src, always_2d=True, dtype='float64')
         xo, _ = sf.read(out, always_2d=True, dtype='float64')
+        # The separator input was silence-trimmed, so the restored file starts
+        # `trim_offset` samples later than the source WAV. Cut the same amount
+        # off the source, otherwise spectrum/noise-floor plots compare two
+        # different points in the song and the A/B is not sample-aligned.
+        _meta = json.load(open(f'{ROOT}/work/prep_meta.json'))
+        _off = _meta.get(tag, {}).get('trim_offset_samples', 0)
+        if _off:
+            xs = xs[_off:]
+        _n = min(len(xs), len(xo))
+        xs, xo = xs[:_n], xo[:_n]
         ms, mo = xs.mean(1), xo.mean(1)
 
         fig = plt.figure(figsize=(15, 11))

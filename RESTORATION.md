@@ -170,17 +170,54 @@ restrained 1960s-style stereo picture.
 
 The band above ~6.5 kHz contains only noise, so it is:
 
-1. attenuated by 16–18 dB (it is noise, and the master needs the headroom),
-2. **replaced by harmonics generated from real content**: the 2.3–6 kHz band is
-   squared and cubed, which produces *only* sum terms (4.6–12 kHz and
-   6.9–18 kHz) — genuine new harmonics, not a copy of the original band,
-3. tilted at a natural −6 dB/octave, gently de-correlated and level-matched to a
-   predictable `air_db` below the programme level.
+1. attenuated by 24 dB (it is noise, and the master needs the headroom),
+2. **replaced by harmonics generated from real content**: a narrow 2.3–4.2 kHz
+   band is squared and cubed, which produces *only* sum terms — genuine new
+   harmonics, not a copy of the original band,
+3. band-limited to 5.8–12 kHz (nothing is synthesised near Nyquist, where it
+   would only read as fizz), box-smoothed on a 1 ms constant and tilted at a
+   natural −6 dB/octave,
+4. **level-gated**: the generator is scaled by a slow envelope so its level stays
+   constant instead of following every hit (see §3.2),
+5. level-matched to **−20 dB relative to the 2–4 kHz presence band** — not to the
+   broadband programme. The low end and the drums differ wildly between these
+   four transfers; the presence band does not, so this is the reference that
+   makes one setting work for all four songs and guarantees the air can never
+   outgrow the music.
 
 Net effect: the top end now **extends to the full 22.05 kHz** (source: hard stop
-at ~15.8 kHz) while the noise in that region is **~6 dB lower** than the source
-(measured −57.1 → −62.8 dB on *Put It On*). That is the difference between
-"brighter" and "cleaner".
+at ~15.8 kHz) and the 6–16 kHz band is no longer noise at all — its spectral
+flatness falls to 0.01–0.04 (source 0.05–0.56), i.e. what is up there is
+harmonically structured, music-following content at a level 20 dB below the
+presence band.
+
+#### 3.2 The click problem, and why it was structural
+
+An earlier version of this chain produced files that *measured* clean on a
+spectrogram but ticked on every drum hit. The cause was found by measuring the
+**kurtosis of the first difference above 5 kHz** on isolated stages — a statistic
+that is blind to level and brutally sensitive to spikes. Three separate defects
+showed up:
+
+1. **Two definitions of `harmonic_excite` in `dsp.py`.** The second (old) one
+   shadowed the new one, so the fix "did not apply" while the file looked right.
+   Lesson: always verify `inspect.signature` after patching DSP code.
+2. **The per-stem exciter was calibrated to programme RMS.** On a quiet, dark
+   stem (e.g. the drums of *I Need You*: 5 kHz+ sits 74 dB below the music) that
+   floods the top end with synthesis. It is now calibrated to the HF that is
+   already present.
+3. **Squaring/cubing concentrates energy on transients.** Even at a correct
+   average level this puts a 2–4 ms HF burst on every hit (measured: 59.3× the
+   median HF envelope vs 21.2× in the source on *Put It On*). Both the stem
+   exciter and the master air now run through an **envelope gate** that holds
+   the generated signal at a constant level (peak_cap × its 95th-percentile
+   level).
+
+After the fix: >5 kHz kurtosis on *Put It On* 12.5 → 21.2 (was 107 before, the
+source is 12.5 and a clean modern master sits at 20–40), HF burst ratio
+59.3× → 18.6× (source 21.2×), click detector 12 → 0. On *I Need You* the full-band
+kurtosis even *improves* (18.98 → 13.41) because repairing the source's own
+dropout edges removes more than the synthesis adds.
 
 ---
 
@@ -188,22 +225,25 @@ at ~15.8 kHz) while the noise in that region is **~6 dB lower** than the source
 
 All figures from `work/summary.py` → `work/summary.json`.
 
-| Song | LUFS | true peak | crest | HF reach | 6–16 kHz band* | stereo corr |
-|---|---|---|---|---|---|---|
-| I Need You | −11.94 → **−12.07** | +0.07 → **−1.00** dBTP | 13.7 → 13.3 dB | 15.8 → **22.05** kHz | −69.3 → **−66.2** dB | 1.0000 → **0.9255** |
-| Lonesome Feeling | −8.45 → **−12.02** | +0.10 → **−1.00** dBTP | 10.9 → 13.8 dB | 15.9 → **22.05** kHz | −59.2 → **−62.8** dB | 1.0000 → **0.9486** |
-| Put It On | −9.67 → **−12.07** | +0.10 → **−1.00** dBTP | 11.9 → 13.9 dB | 15.9 → **22.05** kHz | −57.5 → **−60.9** dB | 1.0000 → **0.9444** |
-| What's New Pussycat | −10.26 → **−12.13** | −0.31 → **−1.00** dBTP | 12.1 → 14.0 dB | 15.8 → **22.05** kHz | −51.9 → **−60.0** dB | 1.0000 → **0.9413** |
+| Song | LUFS | true peak | crest | HF reach | 6–16 kHz band* | 6–16 kHz flatness | stereo corr |
+|---|---|---|---|---|---|---|---|
+| I Need You | −11.94 → **−12.06** | +0.07 → **−1.00** dBTP | 13.7 → 13.4 dB | 15.8 → **22.05** kHz | −69.3 → **−65.1** dB | 0.33 → **0.03** | 1.0000 → **0.9255** |
+| Lonesome Feeling | −8.45 → **−12.01** | +0.10 → **−1.00** dBTP | 10.9 → 13.5 dB | 15.9 → **22.05** kHz | −59.2 → **−57.0** dB | 0.56 → **0.04** | 1.0000 → **0.9443** |
+| Put It On | −9.67 → **−12.01** | +0.10 → **−1.00** dBTP | 11.9 → 13.6 dB | 15.9 → **22.05** kHz | −57.5 → **−54.8** dB | 0.21 → **0.02** | 1.0000 → **0.9409** |
+| What's New Pussycat | −10.26 → **−12.02** | −0.31 → **−1.00** dBTP | 12.1 → 14.0 dB | 15.8 → **22.05** kHz | −51.9 → **−50.5** dB | 0.05 → **0.01** | 1.0000 → **0.9302** |
 
 \* quiet-frame level of the 6–16 kHz band, normalised to −12 LUFS, so it is
 comparable across the four masters. Lower = less hiss.
 
-**A note on the one number that went the "wrong" way.** On *I Need You* the
-6–16 kHz band measures 3 dB *higher* after restoration. That band is not noise
-any more: the spectral flatness of 6–16 kHz drops from **0.63 to 0.23** on this
-song (0.57 → 0.25 and 0.30 → 0.10 on the others), i.e. what used to be
-flat-spectrum hiss is now harmonically structured, music-following content. On
-the other three songs both the level *and* the flatness improve.
+**A note on the 6–16 kHz column.** It measures slightly *higher* after
+restoration on all four songs. That column is not hiss any more: the spectral
+flatness of 6–16 kHz drops from **0.33 → 0.03**, **0.56 → 0.04**, **0.21 → 0.02**
+and **0.05 → 0.01**. Flat spectrum = noise; a low flatness = a few strong,
+harmonically related partials. In other words: what used to be a wall of hiss is
+now the upper harmonics of the music, and it is exactly as loud as the music
+needs it to be. The envelope correlation between that band and the 2–4 kHz
+music content is **0.82–0.87**, i.e. the air moves with the music instead of
+running underneath it — which is precisely what the ear judges.
 
 **Octave balance** (1/1-octave, relative to the mean of 200–800 Hz;
 `work/summary.json` has all four songs):
@@ -211,13 +251,14 @@ the other three songs both the level *and* the flatness improve.
 | | 63 | 100 | 250 | 630 | 1 k | 1.6 k | 2.5 k | 4 k | 6.3 k | 8 k | 10 k | 12.5 k |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Put It On — source | −0.6 | +4.4 | +0.2 | −1.7 | −4.7 | −9.7 | −7.7 | −12.4 | −26.6 | −30.7 | −36.5 | −42.0 |
-| Put It On — restored | +1.9 | +5.3 | −1.4 | +0.3 | −2.5 | −6.1 | −1.3 | −4.4 | −24.1 | −36.1 | −47.2 | −52.8 |
+| Put It On — restored | +1.3 | +5.1 | −1.8 | +0.2 | −2.0 | −4.6 | −3.4 | −7.2 | −21.3 | −27.0 | −37.4 | −60.0 |
 
-Read it as: the **125 Hz–4 kHz region is now continuous and smooth** (the 1 k
+Read it as: the **160 Hz–4 kHz region is now continuous and smooth** (the 1 k
 dip and the 1.6–4 kHz hole are filled — that is the "boxy, dull, shouty" sound
-disappearing), the 250–500 Hz box is pulled back, and everything above 6.3 kHz
-is *quieter* than the source — because what was there was noise, and the air
-that replaced it is generated from the music.
+disappearing), the 250–630 Hz box is pulled back, the 6.3–8 kHz band is
+*quieter* than the source (what was there was noise), and the 12.5–16 kHz
+octaves are 18 dB down instead of a broadband hiss wall. What replaced them is
+the generated air, which is structured (flatness 0.02) rather than noise.
 
 Crest factor going *up* while loudness also goes up (Lonesome Feeling: 10.9 →
 13.8 dB crest at −8.45 → −12.02 LUFS) is the signature of the source being
@@ -229,11 +270,15 @@ needs far less dynamic compression to get there.
 ## 5. What you get / how to listen
 
 Open **`restored/<song> (A-B 30s).wav`**: 30 s of the source (level-matched to
-−12 LUFS so you cannot be fooled by loudness), 0.6 s of silence, then the same
-30 s restored, sample-aligned to within ~6 ms. What to listen for:
+−14 LUFS so you cannot be fooled by loudness), 0.6 s of silence, then the same
+30 s restored. The two halves are sample-aligned: the source is cut by exactly
+the amount the separator trimmed from its head (`work/prep_meta.json`), verified
+by cross-correlation (r = 0.84 at lag 0 on the *Put It On* excerpt). What to
+listen for:
 
 1. **Cymbals and hi-hat** — the source has a dull "shhh", the restored version
-   has an actual metallic ring up to 12 kHz.
+   has an actual metallic ring, and no ticking on the drum hits (this was the
+   hardest part, see §3.2).
 2. **Sibilance and diction** — "s", "t", "ch" land on the beat instead of
    smearing into the next word.
 3. **The 250–500 Hz box** — the source sounds like it is being played through a

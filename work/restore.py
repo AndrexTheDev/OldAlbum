@@ -33,46 +33,46 @@ RECIPES = {
     '1_I_Need_You': dict(
         hum=50.0,
         balance_db={'vocals': 1.5, 'drums': 5.0, 'bass': -3.0, 'other': 0.5},
-        vocal=dict(hp=100.0, presence=2.2, air=4.5, excite=0.30, deess=5700.0),
-        drums=dict(hp=35.0, punch=2.6, excite=0.20),
+        vocal=dict(hp=100.0, presence=2.2, air=4.5, excite=1.9, deess=5700.0),
+        drums=dict(hp=35.0, punch=2.6, excite=1.3),
         bass=dict(hp=30.0, lp=1400.0, lowmid=1.6, harm=0.28),
-        other=dict(hp=95.0, excite=0.30, width=4.0),
+        other=dict(hp=95.0, excite=1.9, width=4.0),
         tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=6300.0,
-        air_noise_cut_db=-24.0, air_db=-42.0, air_top=12000.0,
+        air_noise_cut_db=-24.0, air_db=-17.0, air_top=12000.0,
         dn_vocals=10.0, dn_drums=8.0, dn_other=11.0, dn_master=9.0,
         target_lufs=-12.0, ceiling=-1.0,
     ),
     '2_Lonesome_Feeling': dict(
         hum=50.0,
         balance_db={'vocals': 1.5, 'drums': 3.0, 'bass': -3.0, 'other': 0.5},
-        vocal=dict(hp=100.0, presence=2.0, air=4.0, excite=0.28, deess=5700.0),
-        drums=dict(hp=35.0, punch=2.2, excite=0.19),
+        vocal=dict(hp=100.0, presence=2.0, air=4.0, excite=1.8, deess=5700.0),
+        drums=dict(hp=35.0, punch=2.2, excite=1.2),
         bass=dict(hp=30.0, lp=1400.0, lowmid=1.5, harm=0.26),
-        other=dict(hp=95.0, excite=0.28, width=3.6),
+        other=dict(hp=95.0, excite=1.8, width=3.6),
         tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=6800.0,
-        air_noise_cut_db=-18.0, air_db=-30.0,
+        air_noise_cut_db=-24.0, air_db=-17.0, air_top=12000.0,
         target_lufs=-12.0, ceiling=-1.0,
     ),
     '3_Put_It_On': dict(
         hum=50.0,
         balance_db={'vocals': 1.5, 'drums': 2.5, 'bass': -3.0, 'other': 0.5},
-        vocal=dict(hp=100.0, presence=2.1, air=4.2, excite=0.30, deess=5700.0),
-        drums=dict(hp=35.0, punch=2.4, excite=0.20),
+        vocal=dict(hp=100.0, presence=2.1, air=4.2, excite=1.9, deess=5700.0),
+        drums=dict(hp=35.0, punch=2.4, excite=1.3),
         bass=dict(hp=30.0, lp=1400.0, lowmid=1.55, harm=0.27),
-        other=dict(hp=95.0, excite=0.30, width=3.8),
+        other=dict(hp=95.0, excite=1.9, width=3.8),
         tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=6300.0,
-        air_noise_cut_db=-16.0, air_db=-29.0,
+        air_noise_cut_db=-24.0, air_db=-17.0, air_top=12000.0,
         target_lufs=-12.0, ceiling=-1.0,
     ),
     '4_Whats_New_Pussycat': dict(
         hum=50.0,
         balance_db={'vocals': 1.5, 'drums': 2.0, 'bass': -3.0, 'other': 1.0},
-        vocal=dict(hp=100.0, presence=1.9, air=3.8, excite=0.28, deess=5700.0),
-        drums=dict(hp=35.0, punch=2.0, excite=0.18),
+        vocal=dict(hp=100.0, presence=1.9, air=3.8, excite=1.8, deess=5700.0),
+        drums=dict(hp=35.0, punch=2.0, excite=1.1),
         bass=dict(hp=30.0, lp=1400.0, lowmid=1.4, harm=0.25),
-        other=dict(hp=95.0, excite=0.28, width=3.4),
+        other=dict(hp=95.0, excite=1.8, width=3.4),
         tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=6000.0,
-        air_noise_cut_db=-20.0, air_db=-31.0, dn_vocals=9.0, dn_drums=7.0, dn_other=10.0, dn_master=8.0,
+        air_noise_cut_db=-24.0, air_db=-17.0, air_top=12000.0, dn_vocals=9.0, dn_drums=7.0, dn_other=10.0, dn_master=8.0,
         target_lufs=-12.0, ceiling=-1.0,
     ),
 }
@@ -163,6 +163,45 @@ def band_edges(x, sr=SR):
     return out
 
 
+
+# ---------------------------------------------------------------- diagnostics
+import os as _os
+_DEBUG = _os.environ.get('RESTORE_DEBUG') == '1'
+_KLOG = []
+
+
+def k5(x, label=''):
+    """Kurtosis of the difference above 5 kHz - sensitive to spike/edge artifacts."""
+    if not _DEBUG:
+        return
+    from scipy import signal as _s
+    a = np.asarray(x, dtype=np.float64)
+    if a.ndim > 1:
+        a = a.mean(axis=1)
+    b1, a1 = _s.butter(6, 5000.0 / (SR / 2), 'high')
+    hi = _s.filtfilt(b1, a1, a)
+    d = np.diff(hi); d -= d.mean(); v = d.var()
+    k = float((d ** 4).mean() / v ** 2) if v > 0 else 0.0
+    _KLOG.append((label, round(k, 2)))
+    # 6-16 kHz level in the quietest 10% of 100 ms frames, normalised to -12 LUFS
+    st_ = np.stack([a, a], 1)
+    g = 10 ** ((-12.0 - loudness(st_)) / 20.0)
+    m = a * g
+    nb = int(0.1 * SR)
+    N = len(m) // nb
+    fr = m[:N * nb].reshape(N, nb)
+    rmsv = np.sqrt((fr ** 2).mean(axis=1))
+    idx = np.argsort(rmsv)[:max(1, int(0.10 * N))]
+    f_, P_ = _s.welch(fr[idx].ravel(), SR, nperseg=8192)
+    bm = (f_ >= 6000) & (f_ < 16000)
+    n6 = round(10 * np.log10(max(float(P_[bm].sum()), 1e-30)), 1)
+    f2_, P2_ = _s.welch(m, SR, nperseg=8192)
+    hi_ = (f2_ >= 15000) & (f2_ < 20000)
+    ref_ = (f2_ >= 200) & (f2_ < 800)
+    h15 = round(10 * np.log10(max(float(P2_[hi_].sum()), 1e-30) / max(float(P2_[ref_].sum()), 1e-30)), 1)
+    print('  k5 %-22s %8.2f   n6 %6.1f   h15 %6.1f' % (label, k, n6, h15), flush=True)
+
+
 # ---------------------------------------------------------------- main
 def restore_song(tag, out_dir, rec=None, verbose=True):
     rec = rec or RECIPES[tag]
@@ -196,9 +235,10 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
     # denoise AFTER the tonal lift, otherwise we amplify tape/quantisation hiss
     v = denoise(v, SR, reduction_db=rec.get('dn_vocals', 6.0), floor_db=-22.0)
     v = deess(v, SR, freq=rec['vocal']['deess'])
-    v = harmonic_excite(v, SR, amount=rec['vocal']['excite'], band=(2500, 3300), max_hz=15500)
+    v = harmonic_excite(v, SR, amount=rec['vocal']['excite'], band=(2500, 3300), max_hz=12000)
     v = transient_shape(v, SR, attack_db=1.4, sustain_db=-0.7)
     v, gr = soft_comp(v, SR, -9.0, 2.2, 8, 150, makeup=0)
+    k5(v, 'vocals_out')
     proc['vocals'] = {'declicked': int(nclick), 'hum_notches': hum, 'comp_gr_db': round(gr, 2)}
 
     # ---------------------------------------------------------- DRUMS
@@ -212,9 +252,10 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
                      6000, 9000, 13000, 16000],
                  [1.0, 2.2, 1.4, -0.6, -1.2, -0.6, 0.4, 0.9, 1.4, 1.5, 1.7, 1.9, 2.0, 1.6])
     d = denoise(d, SR, reduction_db=rec.get('dn_drums', 4.0), floor_db=-22.0)
-    d = harmonic_excite(d, SR, amount=rec['drums']['excite'], band=(2800, 3800), max_hz=15500)
+    d = harmonic_excite(d, SR, amount=rec['drums']['excite'], band=(2800, 3800), max_hz=12000)
     d = hf_control(d, SR, 6500.0, -34.0, 3.0)
     d, gr = soft_comp(d, SR, -8.0, 2.4, 14, 200)
+    k5(d, 'drums_out')
     proc['drums'] = {'declicked': int(nclick), 'hum_notches': hum, 'comp_gr_db': round(gr, 2)}
 
     # ---------------------------------------------------------- BASS
@@ -232,6 +273,7 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
     harm = sg.filtfilt(*sg.butter(4, [70 / (SR / 2), 400 / (SR / 2)], 'band'), np.abs(b))
     b = (b + rec['bass']['harm'] * harm.astype(np.float32)).astype(np.float32)
     b, gr = soft_comp(b, SR, -8.0, 2.0, 18, 210)
+    k5(b, 'bass_out')
     proc['bass'] = {'declicked': int(nclick), 'hum_notches': hum, 'comp_gr_db': round(gr, 2)}
 
     # ---------------------------------------------------------- OTHER
@@ -244,10 +286,11 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
                      9000, 12000, 16000],
                  [-9, -3.5, -1.2, 0.2, 0.6, 0.8, 1.1, 1.4, 1.5, 1.7, 2.0, 2.2, 1.8])
     o = denoise(o, SR, reduction_db=rec.get('dn_other', 8.0), floor_db=-22.0)
-    o = harmonic_excite(o, SR, amount=rec['other']['excite'], band=(2500, 3600), max_hz=15500)
+    o = harmonic_excite(o, SR, amount=rec['other']['excite'], band=(2500, 3600), max_hz=12000)
     o = transient_shape(o, SR, attack_db=0.8, sustain_db=-0.4)
     o = hf_control(o, SR, 6500.0, -30.0, 2.5)
     o, gr = soft_comp(o, SR, -9.0, 1.9, 20, 240)
+    k5(o, 'other_out')
     proc['other'] = {'declicked': int(nclick), 'hum_notches': hum, 'comp_gr_db': round(gr, 2)}
 
     # ---------------------------------------------------------- BALANCE
@@ -287,10 +330,13 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
     side_vocal = 0.10 * (side_from(stem['vocals'], 11.3) - side_from(stem['vocals'], 16.7))
     side = (side_music + side_vocal).astype(np.float32)
 
+    k5(side, 'side')
+    k5(bed, 'bed')
     mid = core + bed * 0.94
     left = mid + side
     right = mid - side
     st = np.stack([left, right], axis=-1).astype(np.float32)
+    k5(st, 'premaster')
     info['premaster_corr'] = round(float(np.corrcoef(st[:, 0], st[:, 1])[0, 1]), 4)
     _side = (st[:, 0] - st[:, 1]) / 2
     _mid = (st[:, 0] + st[:, 1]) / 2
@@ -303,15 +349,19 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
     st, gr_glue = compress(st, SR, thresh_db=rms_db(m_st) - 7.0, ratio=2.0,
                            attack_ms=35, release_ms=280, makeup_db=0.0, knee_db=10)
     # put back the sub-40 Hz weight the lossy encode clipped away
+    k5(st, 'glue')
     st = eq_curve(st, [20, 30, 40, 55, 80, 120, 200],
                   [3.5, 2.6, 1.4, 0.4, 0.0, 0.0, 0.0])
+    k5(st, 'sub_eq')
     # 2. parallel ('New York') compression: a heavily compressed copy lifts the
     #    quiet detail between the hits - the density a modern master has, while
     #    the transients of the dry signal survive untouched
     par, _ = compress(st, SR, thresh_db=rms_db(m_st) - 22.0, ratio=3.5,
                       attack_ms=6, release_ms=140, makeup_db=0.0, knee_db=8)
     par = norm_db(par, rms_db(st) - 6.0)
+    k5(par, 'parallel_copy')
     st = (st * 0.80 + par * 0.20).astype(np.float32)
+    k5(st, 'parallel_mix')
     info['parallel_pct'] = 20.0
     # tonal finish: match a modern reference balance (this is where the
     # 'sounds like a clean record of today' part happens)
@@ -322,14 +372,20 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
                           'before_octave_db': {int(k): v for k, v in before.items()},
                           'after_octave_db': {int(k): v for k, v in after.items()}}
     # the tonal lift inevitably raises tape/quantisation hiss -> clean it again
+    k5(st, 'tone_match')
     st = denoise(st, SR, reduction_db=rec.get('dn_master', 6.0), floor_db=-24.0)
+    k5(st, 'denoise_master')
     # Remove the boxiness the acetate transfer left around 250-500 Hz: the
     # source carries +2..3 dB too much there relative to the rest.
     st = eq_curve(st, [120, 200, 280, 380, 500, 700, 900],
                   [0.0, -0.8, -1.8, -2.2, -1.6, -0.4, 0.0])
+    k5(st, 'debox')
     st = dsp.spectral_repair(st, SR, content_hz=rec['air_from_hz'],
                              noise_cut_db=rec['air_noise_cut_db'],
-                             air_db=rec['air_db'], excite_top=rec.get('air_top',12000.0))
+                             air_db=rec['air_db'], excite_top=rec.get('air_top', 12000.0),
+                             peak_cap=rec.get('air_peak_cap', 1.0),
+                             follow=rec.get('air_follow'))
+    k5(st, 'spectral_repair')
 
     # ---------------------------------------------------------- LIMIT + NORMALISE
     # Iterate: push to the loudness target, catch the peaks at the ceiling,
