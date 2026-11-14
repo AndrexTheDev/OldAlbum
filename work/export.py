@@ -198,7 +198,18 @@ def main():
     for out in sorted(glob.glob(f'{ROOT}/restored/*(restored).wav')):
         tag = tag_of(out)
         title = tag.split('_', 1)[1].replace('_', ' ').replace("Whats", "What's")
-        mp3 = f'{ROOT}/restored/{tag}.mp3'
+        # The name must match what RESTORATION.md promises and what the player
+        # shows next to the WAV: "<song> (restored).mp3". An earlier version wrote
+        # "<song>.mp3", so the fixed encodes and the stale envelope-peak encodes
+        # coexisted under two different names and the *documented* file was the
+        # old one. A dangling duplicate is worse than none: it is what a listener
+        # downloads first.
+        # `tag` here already carries the "(restored)" suffix, because the loop
+        # globs "<song> (restored).wav". Appending it again produced
+        # "<song> (restored) (restored).mp3" - so strip it first, then build the
+        # one name the documentation promises.
+        base = tag.replace(' (restored)', '')
+        mp3 = f'{ROOT}/restored/{base} (restored).mp3'
         make_mp3(out, mp3, title)
         print('  mp3:', os.path.basename(mp3), flush=True)
 

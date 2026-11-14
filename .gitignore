@@ -16,9 +16,15 @@ work/*.log
 work/report.json
 
 # ---- audio deliverables ----------------------------------------------------
-# The 24-bit masters are enormous; the deliverables that belong in the repo are
-# the FLAC masters, the 320 kb/s MP3s and the 16-bit WAVs.
+# Everything a listener is told to download must actually be in the repo.
+# This used to ignore restored/*.wav, which silently excluded the 24-bit WAV
+# masters AND the A/B excerpts - the one file a listener is most likely to open -
+# while RESTORATION.md documented them as deliverables. The FLAC masters cover
+# lossless audio, but the A/B excerpts have no lossless equivalent elsewhere, so
+# they are tracked; the redundant 24-bit WAV duplicate of the FLAC is not kept
+# (it is ~48 MB per song at the same resolution as the FLAC).
 restored/*.wav
+!restored/*(A-B 30s).wav
 masters/*.wav
 
 # ---- misc ------------------------------------------------------------------
