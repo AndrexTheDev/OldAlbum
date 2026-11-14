@@ -71,7 +71,9 @@ def decorrelate(x, sr=SR, hp_hz=250.0, stages=_STAGES, normalize=True):
     return y
 
 
-def build_side(mid_sources, sr=SR, target_corr=0.93, hp_hz=900.0, mix_db=0.0):
+def build_side(mid_sources, sr=SR, target_corr=0.93, hp_hz=900.0, mix_db=0.0,
+               tilt_db=((60, -14.0), (200, -10.0), (700, -6.0), (1600, -3.0),
+                        (4000, 0.0), (10000, 1.5), (20000, 2.0))):
     """Build a side signal from the programme whose level hits a target correlation.
 
     For an uncorrelated side of RMS ratio k against the mid, the inter-channel
@@ -86,7 +88,30 @@ def build_side(mid_sources, sr=SR, target_corr=0.93, hp_hz=900.0, mix_db=0.0):
     rms = lambda v: np.sqrt(np.mean(v ** 2)) + 1e-12
     k = np.sqrt(max(1e-6, (1.0 - target_corr) / (1.0 + target_corr)))
     side *= (k * rms(m) * (10 ** (mix_db / 20.0))) / rms(side)
+    # Frequency-dependent width. A flat side is *too* wide in the presence band:
+    # measured -5 to -7 dB side/mid at 2-8 kHz, which reads as phasey rather than
+    # spacious. Real width on an acoustic recording grows towards the top (room,
+    # cymbals, reverb tails), so the side is tilted: restrained through the mids,
+    # open above ~3 kHz. This also keeps voices and snare centred, which is what
+    # makes a mix feel solid.
+    if tilt_db:
+        side = _tilt(side, sr, tilt_db)
     return side.astype(np.float32)
+
+
+def _tilt(x, sr, points):
+    """Zero-phase, linear-phase tilt on the side channel (pairs of freq, dB)."""
+    from scipy import signal as _sg
+    f = np.array([p[0] for p in points], float)
+    g = np.array([p[1] for p in points], float)
+    # sinusoidal interpolation on a log-frequency grid, then an FIR
+    grid = np.linspace(0, sr / 2, 2049)
+    lg = np.interp(np.log10(np.maximum(grid, 1.0)), np.log10(f), g)
+    mag = 10 ** (lg / 20.0)
+    h = np.fft.irfft(mag, n=4096)
+    h = np.roll(h, 2048) * np.hanning(4096)
+    h /= np.abs(np.fft.rfft(h, 1 << 14)).max()
+    return _sg.fftconvolve(x, h, 'same')
 
 
 def analyse(st, sr=SR):

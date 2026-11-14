@@ -97,10 +97,18 @@ def docs_plots():
 
         for col, (sig_, lab) in enumerate(((ms, 'SOURCE'), (mo, 'RESTORED'))):
             ax = fig.add_subplot(gs[0, col])
-            f, t, Z = signal.stft(sig_, SR, nperseg=4096, noverlap=3072)
-            M = 20 * np.log10(np.maximum(np.abs(Z), 1e-12))
-            im = ax.pcolormesh(t, f, M, vmin=M.max() - 80, vmax=M.max(),
+            # 4096/3072 over a three-minute master is a 2049 x 7281 complex matrix
+            # (~240 MB) per channel, and the float64 spectrogram of it doubles that.
+            # Two panels + the rest of the figure is enough to get the process
+            # killed on a 4 GB box - which is what happened: the plot loop died
+            # silently after song 1 with no traceback. Hop 2048 halves the frames
+            # and makes the time axis slightly coarser, which is invisible at this
+            # figure size.
+            f, t, Z = signal.stft(sig_, SR, nperseg=4096, noverlap=2048)
+            M = (20 * np.log10(np.maximum(np.abs(Z), 1e-12))).astype(np.float32)
+            im = ax.pcolormesh(t, f, M, vmin=float(M.max()) - 80, vmax=float(M.max()),
                                shading='auto', cmap='magma')
+            del Z, M
             ax.set_ylim(0, 20000); ax.set_ylabel('Hz')
             ax.set_title(f'{lab} — {tag}', fontsize=10)
             plt.colorbar(im, ax=ax, pad=0.01)
@@ -141,7 +149,14 @@ def docs_plots():
         ax.set_title('stereo image (source is dual mono)'); ax.legend(fontsize=8)
 
         plt.savefig(f'{ROOT}/docs/{tag}_comparison.png', dpi=100, bbox_inches='tight')
-        plt.close()
+        plt.close(fig)
+        # The figures are large (three panels, spectrograms of ~3 minutes) and
+        # matplotlib + the accumulated arrays are enough to get the process killed
+        # on a 4 GB box - silently, with no traceback, after the first song.
+        # Releasing everything per iteration makes the loop safe.
+        import gc
+        del xs, xo, ms, mo, fig
+        gc.collect()
         print('plot:', tag, flush=True)
 
 

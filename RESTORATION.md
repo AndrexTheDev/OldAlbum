@@ -195,8 +195,24 @@ means.
 
 The level is *solved*, not guessed: for an uncorrelated side of RMS ratio k the
 inter-channel correlation is (1−k²)/(1+k²), so k is inverted from the requested
-correlation (0.93). The side is added as ±, so it cancels exactly in mono - the
-mono sum is the mid signal, bit for bit.
+correlation. The side is added as ±, so it cancels exactly in mono - the mono sum
+is the mid signal, bit for bit.
+
+The width is **tilted with frequency**, because a flat side measures *too* wide
+where it matters: at −5…−7 dB side/mid across 2-8 kHz the image reads as phasey,
+not spacious, and voices lose their centre. Real width on an acoustic recording
+grows towards the top (room, cymbals, tails), so the side is restrained through
+the mids and opens above 4 kHz. Measured on the masters:
+
+| band | side/mid | |
+|---|---|---|
+| 60-200 Hz | −58 dB | mono (bass, kick) |
+| 200-700 Hz | −34 dB | mono (body) |
+| 900-2000 Hz | −13 dB | centred (voice) |
+| 2-8 kHz | −7…−8 dB | opening |
+| 8-12 kHz | −7 dB | open ("air") |
+
+Overall correlation 0.959-0.967, side/mid −17 dB.
 
 The previous version subtracted two delayed copies of the bed (8.7 ms / 13.1 ms).
 That is a **comb filter**: measured 34.5 dB peak-to-trough ripple over 1-16 kHz,
@@ -295,10 +311,10 @@ All figures from `work/summary.py` → `work/verify_summary.json`.
 
 | Song | LUFS | true peak | crest | HF reach | corr(output HF, source HF) | stereo corr |
 |---|---|---|---|---|---|---|
-| I Need You | −11.94 → **−12.01** | +0.07 → **−1.00** dBTP | 13.7 → 13.4 dB | 15.8 → **15.97** kHz | **0.71** | 1.0000 → **0.9266** |
-| Lonesome Feeling | −8.45 → **−12.00** | +0.10 → **−1.00** dBTP | 10.9 → 13.3 dB | 15.9 → **16.5** kHz | **0.92** | 1.0000 → **0.9202** |
-| Put It On | −9.67 → **−12.00** | +0.10 → **−1.00** dBTP | 11.9 → 13.6 dB | 15.9 → **16.5** kHz | **0.88** | 1.0000 → **0.9220** |
-| What's New Pussycat | −10.26 → **−12.01** | −0.31 → **−1.00** dBTP | 12.1 → 13.6 dB | 15.8 → **17.9** kHz | **0.93** | 1.0000 → **0.9197** |
+| I Need You | −11.94 → **−12.01** | +0.07 → **−1.00** dBTP | 13.7 → 13.2 dB | 15.8 → **15.97** kHz | **0.71** | 1.0000 → **0.9603** |
+| Lonesome Feeling | −8.45 → **−12.00** | +0.10 → **−1.00** dBTP | 10.9 → 13.3 dB | 15.9 → **16.5** kHz | **0.92** | 1.0000 → **0.9671** |
+| Put It On | −9.67 → **−12.00** | +0.10 → **−1.00** dBTP | 11.9 → 13.6 dB | 15.9 → **16.5** kHz | **0.88** | 1.0000 → **0.9615** |
+| What's New Pussycat | −10.26 → **−12.01** | −0.31 → **−1.00** dBTP | 12.1 → 13.6 dB | 15.8 → **17.9** kHz | **0.93** | 1.0000 → **0.9589** |
 
 ### Noise: the number this project got wrong for a long time
 
