@@ -1,0 +1,42 @@
+{
+  "1_I_Need_You": {
+    "trim_offset_samples": 24407,
+    "trim_offset_s": 0.5534,
+    "dc_offset_removed": [
+      0.0079352,
+      0.0079352
+    ],
+    "duration_s": 185.196,
+    "samples": 8167147
+  },
+  "2_Lonesome_Feeling": {
+    "trim_offset_samples": 23688,
+    "trim_offset_s": 0.5371,
+    "dc_offset_removed": [
+      -5.12e-05,
+      -5.12e-05
+    ],
+    "duration_s": 169.024,
+    "samples": 7453977
+  },
+  "3_Put_It_On": {
+    "trim_offset_samples": 24427,
+    "trim_offset_s": 0.5539,
+    "dc_offset_removed": [
+      -3.33e-05,
+      -3.34e-05
+    ],
+    "duration_s": 186.763,
+    "samples": 8236266
+  },
+  "4_Whats_New_Pussycat": {
+    "trim_offset_samples": 25527,
+    "trim_offset_s": 0.5788,
+    "dc_offset_removed": [
+      8.87e-05,
+      8.87e-05
+    ],
+    "duration_s": 177.81,
+    "samples": 7841439
+  }
+}

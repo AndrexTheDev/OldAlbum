@@ -1,0 +1,25 @@
+# ---- derived / regenerable working data (see RESTORATION.md §6) -------------
+# Decoded sources (245 MB), per-song stems (968 MB), separation inputs,
+# ONNX model download, transient plots and logs are all reproducible with
+# work/run_separation.py + work/run_all_restore.sh, and would blow up the repo,
+# so they are not tracked.
+work/src/
+work/prep/
+work/stems/
+work/models/
+work/logs/
+work/plots/
+work/__pycache__/
+work/*.log
+work/report.json
+
+# ---- audio deliverables ----------------------------------------------------
+# The 24-bit masters are enormous; the deliverables that belong in the repo are
+# the FLAC masters, the 320 kb/s MP3s and the 16-bit WAVs.
+restored/*.wav
+masters/*.wav
+
+# ---- misc ------------------------------------------------------------------
+.venv/
+*.pyc
+.DS_Store
