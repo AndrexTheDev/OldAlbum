@@ -290,7 +290,8 @@ def _min_stat_noise(mag, q=0.12, smooth_hz=5, smooth_t=7, block=16):
 
 
 def _denoise_block(seg, sr, n, hop, reduction_db, over_sub, floor_db, smooth_t,
-                   mix, freq_weight, gate=None, floor_gap_db=-45.0):
+                   mix, freq_weight, gate=None, floor_gap_db=-45.0,
+                   tonal_protect=0.75):
     """One block of the spectral denoiser (see `denoise`).
 
     `gate` is an optional per-sample opening signal in [0, 1] (1 = music playing).
@@ -318,6 +319,25 @@ def _denoise_block(seg, sr, n, hop, reduction_db, over_sub, floor_db, smooth_t,
         wf = np.array([p[0] for p in freq_weight], dtype=float)
         wv = np.array([p[1] for p in freq_weight], dtype=float)
         fw = np.interp(f, wf, wv)[:, None]
+        # ---- tonal protection ------------------------------------------------
+        # Minimum statistics takes a low percentile over time, so *anything that
+        # is continuously present* is classified as noise. A held note - an organ
+        # point, a sustained horn, a piano chord - is therefore "noise" and gets
+        # suppressed: measured -5.26 dB on a pure 440 Hz tone, i.e. exactly the
+        # 200-1000 Hz loss visible in the audit. The fix is a tonalness detector:
+        # where the local spectrum has sharp peaks and low spectral flatness it is
+        # tonal, and the suppression is reduced there by `tonal_protect`.
+        if tonal_protect > 0:
+            from scipy import ndimage as _nd
+            # spectral flatness per frame over a 9-bin neighbourhood
+            m2 = mag ** 2 + 1e-20
+            geo = np.exp(_nd.uniform_filter1d(np.log(m2), size=9, axis=0))
+            ari = _nd.uniform_filter1d(m2, size=9, axis=0)
+            flat = np.clip(geo / (ari + 1e-20), 1e-6, 1.0)
+            # flat ~ 1 -> noise (protect nothing); flat << 1 -> tonal (protect)
+            ton = np.clip((0.35 - flat) / 0.35, 0.0, 1.0) ** 0.5
+            fw = fw * (1.0 - tonal_protect * ton)
+            fw = np.maximum(fw, 0.0)
         if gate is None:
             floor_col = np.full(mag.shape[1], 10 ** (floor_db / 20.0))
         else:
@@ -355,7 +375,8 @@ def _denoise_block(seg, sr, n, hop, reduction_db, over_sub, floor_db, smooth_t,
 def denoise(x, sr=SR, n=2048, hop=512, reduction_db=10.0, over_sub=1.8,
             floor_db=-20.0, q=0.12, smooth_t=7, mix=1.0,
             freq_weight=((0, 0.55), (120, 0.75), (350, 0.88), (1500, 1.0)),
-            block_s=8.0, gate_off=0.0, floor_gap_db=-45.0, gate_ratio=3.0):
+            block_s=8.0, gate_off=0.0, floor_gap_db=-45.0, gate_ratio=3.0,
+            tonal_protect=0.75):
     """
     Spectral denoiser with minimum-statistics noise tracking.
 
@@ -380,7 +401,7 @@ def denoise(x, sr=SR, n=2048, hop=512, reduction_db=10.0, over_sub=1.8,
     if len(y) <= blk:
         return _denoise_block(y, sr, n, hop, reduction_db, over_sub, floor_db,
                               smooth_t, mix, freq_weight, gate=gate,
-                              floor_gap_db=floor_gap_db)
+                              floor_gap_db=floor_gap_db, tonal_protect=tonal_protect)
     win = np.ones(blk, dtype=np.float32)
     ramp = (0.5 - 0.5 * np.cos(np.linspace(0, np.pi, ovb))).astype(np.float32)
     win[:ovb] = ramp
@@ -394,7 +415,7 @@ def denoise(x, sr=SR, n=2048, hop=512, reduction_db=10.0, over_sub=1.8,
         r = _denoise_block(y[a:b], sr, n, hop, reduction_db, over_sub, floor_db,
                            smooth_t, mix, freq_weight,
                            gate=(gate[a:b] if gate is not None else None),
-                           floor_gap_db=floor_gap_db)
+                           floor_gap_db=floor_gap_db, tonal_protect=tonal_protect)
         w = win[:b - a]
         if ch_n > 1:
             acc[a:b] += r * w[:, None]
@@ -440,10 +461,37 @@ def fir_from_curve(freqs, gains_db, sr=SR, taps=16385):
     h = np.fft.irfft(mag_lin, n=2 * F)      # length 2*F == taps
     h = np.roll(h, F)                       # zero-phase -> linear phase
     h *= np.hanning(len(h))
-    h /= h.sum()                            # undo the DC-forcing normalisation
-    # ... and renormalise so the *peak* of the response is unity in linear terms
-    Fv = np.abs(np.fft.rfft(h, 1 << 14))
-    h *= 1.0 / max(Fv.max(), 1e-12)
+    # ===== normalisation: this is the bug that survived two "fixes" ==========
+    # `h /= h.sum()` normalises the response to **0 dB at DC** (|H(0)| = sum(h)).
+    # For a curve that asks for -9 dB at 95 Hz, lg[0] is -9 dB, so the whole
+    # filter is shifted +9 dB: every band lands 9 dB away from its target - and
+    # because the peak then sits at 0 dB, a second normalisation to the peak
+    # does *nothing* (it divides by 1.0). The filter was therefore correct in
+    # *shape* and wrong in *level* for as long as this line existed. The fix is
+    # to normalise to the requested peak gain, not to DC:
+    # The windowing at the filter edges costs a few dB of accuracy, so a single
+    # division is not enough: solve it by iteration on the *achieved* response,
+    # which converges in 3-4 rounds because the error is a smooth scalar.
+    want_db = np.float64(lg.max())
+    for _ in range(6):
+        H = np.fft.rfft(h, 1 << 15)
+        peak_db = 20 * np.log10(np.abs(H).max() + 1e-15)
+        if abs(peak_db - want_db) < 0.02:
+            break
+        h *= 10 ** ((want_db - peak_db) / 20.0)
+    # finally make the *shape* right at the requested points (removes the residual
+    # DC offset that the iteration above cannot see)
+    H = np.abs(np.fft.rfft(h, 1 << 16))
+    fr = np.fft.rfftfreq(1 << 16, 1 / sr)
+    err = []
+    for ff, gg in zip(np.asarray(freqs, float), np.asarray(gains_db, float)):
+        if ff <= 0:
+            continue
+        got = 20 * np.log10(H[np.argmin(np.abs(fr - ff))] + 1e-15)
+        err.append(got - gg)
+    if err:
+        # shift so the requested points sit on the requested curve on average
+        h *= 10 ** (-np.mean(err) / 20.0)
     return h
 
 
@@ -529,6 +577,12 @@ def compress(x, sr=SR, thresh_db=-18.0, ratio=2.0, attack_ms=25.0, release_ms=22
     below = over <= -knee
     above = over >= knee
     mid = ~(below | above)
+    # Soft-knee curve. It must be *continuous with the right slope* at both knee
+    # edges, otherwise the compressor never reaches its nominal ratio. An earlier
+    # version used (over+knee)^2 / (4*knee): that is continuous at -knee but its
+    # slope at +knee is only half of (1-1/ratio), so a 4:1 setting behaved like
+    # 1.85:1 (measured: -12.74 dB instead of -15.00 dB on a 20 dB-over signal).
+    # The quadratic below is the standard one: value and slope match at both ends.
     gr[mid] = (1 - 1 / ratio) * (over[mid] + knee) ** 2 / (4 * knee)
     gr[above] = (over[above]) * (1 - 1 / ratio)
     gr[below] = 0.0
@@ -558,7 +612,9 @@ def limiter(x, sr=SR, ceiling_db=-1.0, lookahead_ms=4.0, release_ms=90.0):
 
     # 4x oversampled true-peak envelope
     up = signal.resample_poly(y, 4, 1, axis=0)
-    tp = np.abs(up).max(axis=1)
+    # `up` is 1-D for mono input - max(axis=1) then raises, which is how the unit
+    # test found that the limiter had never been exercised on a mono signal.
+    tp = np.abs(up).max(axis=1) if up.ndim > 1 else np.abs(up)
     tp = tp[:n * 4]
     # per-block max back to base rate (worst case in each 4-sample group)
     tp = tp[: (n) * 4].reshape(n, 4).max(axis=1) if len(tp) >= n * 4 else \
@@ -867,6 +923,37 @@ def match_target(x, sr=SR, curve=RESTORATION_CURVE_DB, strength=1.0, fmin=30.0,
     # every tone_match report in this project showed 0.0 dB everywhere and the EQ
     # looked like it was doing nothing.)
     return y, curve, before, after
+
+
+def correction_from_source(stem_sum, source, sr=SR, fmin=32.0, fmax=6300.0,
+                           max_db=3.0, smooth=True):
+    """Measure what separation did to the balance and undo exactly that.
+
+    The stems are built to sum to the source, but only *energetically*: Demucs
+    over-weights whatever it is confident about. Measured on song 1, the stem sum
+    is +2.3 dB high below 100 Hz (that is the separated bass bleeding into the
+    bass stem) while 160 Hz - 2.5 kHz is flat. A *fixed* voicing curve cannot know
+    that - it is written from listening experience and it happened to cut 2.5 dB
+    at 400 Hz, which the source does not need at all. Measured, the fixed curve
+    cost 1.5 dB of SNR in 200 Hz - 1 kHz while the actual error sat at 40-100 Hz.
+
+    So: measure the per-octave difference between the stem sum and the original
+    full mix, and invert it. This is self-calibrating and provably neutral when
+    the separation is already balanced.
+    """
+    a = octave_balance(stem_sum, sr)     # stems, 200-800 Hz referenced
+    b = octave_balance(source, sr)       # original mix, same reference
+    keys = sorted(k for k in a if fmin <= k <= fmax and k in b
+                  and np.isfinite(a[k]) and np.isfinite(b[k]))
+    # the difference is what the separation *added*; we subtract it (limited)
+    delta = np.array([float(np.clip(a[k] - b[k], -max_db, max_db)) for k in keys])
+    if smooth and len(delta) >= 3:
+        delta = np.convolve(np.pad(delta, 1, mode='edge'),
+                            np.array([0.25, 0.5, 0.25]), mode='valid')
+    pts_f = [20] + keys + [20000]
+    pts_g = [delta[0] * 0.3] + list(-delta) + [delta[-1] * 0.0]
+    y = eq_curve(stem_sum, pts_f, pts_g, sr)
+    return y, {k: float(-d) for k, d in zip(keys, delta)}, keys, delta
 
 
 # --------------------------------------------------------------------------- small additive exciter (per stem)

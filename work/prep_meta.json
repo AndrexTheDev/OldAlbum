@@ -13,8 +13,8 @@
     "trim_offset_samples": 23688,
     "trim_offset_s": 0.5371,
     "dc_offset_removed": [
-      -5.12e-05,
-      -5.12e-05
+      -5.13e-05,
+      -5.13e-05
     ],
     "duration_s": 169.024,
     "samples": 7453977
@@ -26,8 +26,8 @@
       -3.33e-05,
       -3.34e-05
     ],
-    "duration_s": 186.763,
-    "samples": 8236266
+    "duration_s": 186.742,
+    "samples": 8235308
   },
   "4_Whats_New_Pussycat": {
     "trim_offset_samples": 25527,
@@ -36,7 +36,7 @@
       8.87e-05,
       8.87e-05
     ],
-    "duration_s": 177.81,
-    "samples": 7841439
+    "duration_s": 177.804,
+    "samples": 7841145
   }
 }

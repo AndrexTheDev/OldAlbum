@@ -117,8 +117,9 @@ transient-rich — i.e. the masks behave, and the stem sum matches the mix.
 Every step is **zero-phase or linear-phase** (Butterworth `filtfilt`,
 linear-phase FIR, or sample-aligned envelope work), so the four stems stay
 sample-locked and no transient smearing or phase cancellation is introduced
-(verified: best lag between the stem sum and the source is **0 samples** at
-20/40/60/80 s, correlation 0.97).
+(verified on all four songs: best lag between the stem sum and the source is
+**0 samples**, correlation 0.974/0.981/0.979/0.974 over a 20 s window, stem sum
+1.1-1.3 dB below the dry mix because Demucs' soft masks are lossy).
 
 The architecture is deliberately lopsided: **almost nothing per stem, almost
 everything on the bus.** That is a measurement result, not a preference.
@@ -142,14 +143,25 @@ structural:
   "exciter" colour that makes a restoration sound like an effect.
 
 All three are gone. One denoiser, one voicing, one dynamics stage, all on the
-summed programme. Measured effect of the change, in-band SNR of the noise floor
-(true quiet passages) against a level-matched source:
+summed programme.
+
+**Re-verified after the denoiser fix (§3.4 bug 6) the improvement is smaller than
+this document used to claim.** With the tonal protection in place, the honest
+level-matched SNR change for the three bands the per-stem chain was worst in is
+(negative = worse than source):
 
 | song | 200-1k | 1k-4k | 4k-8k |
 |---|---|---|---|
-| *I Need You* | −7.8 → **−0.7** | −6.5 → **+1.3** | −6.3 → **+2.1** |
-| *Put It On* | −4.5 → **−0.9** | −5.3 → **+0.2** | −4.3 → **−1.0** |
-| *Pussycat* | −7.3 → **−1.2** | −2.6 → **+0.3** | −4.2 → **−0.5** |
+| *I Need You* | −0.7 | +0.0 | **+2.6** |
+| *Put It On* | −0.4 | −0.1 | −1.1 |
+| *Pussycat* | +0.2 | +0.6 | −0.1 |
+
+What the bus architecture still buys, unambiguously, is the **absence of the
+four-hiss build-up**: the previous per-stem design measured 8.5 dB *worse* than
+its own source in the summed programme, and nothing in the current chain does
+that. But the claim "−7.8 → −0.7 dB in 200 Hz-1 kHz" was manufactured by the two
+bugs in §3.4 (the −9 dB EQ offset and the denoiser eating held notes); with both
+fixed the honest statement is "unchanged in the mids, cleaner in the top".
 
 ### Per stem (short on purpose)
 
@@ -233,11 +245,13 @@ the music.
    loudness loop.
 3. 24-bit FLAC master + 16-bit dithered WAV + 320 kb/s MP3.
 
-### 3.4 Four bugs found by auditing the audit
+### 3.4 Six bugs found by auditing the audit
 
 The defect table in §4 disagreed with the chain's own report, which turned out to
-be correct - about the wrong thing. All four were found by measuring, and all
-four were real:
+be correct - about the wrong thing. All six were found by measuring, and all six
+were real. The last two were found only by re-verifying *every stage against a
+known answer*, which is what the permanent test file `work/selftest.py` now does
+on every run.
 
 1. **`fir_from_curve` normalised to 0 dB at DC.** Any curve that cut the bass
    (-9 dB at 95 Hz) silently added **+9 dB to the entire signal**. Every "the EQ
@@ -251,6 +265,45 @@ four were real:
 4. **The loudness loop only ever gained up**, so a programme whose peaks sat
    lower was delivered at −2.38 dBTP instead of −1.00. Fixed with the fixed-point
    iteration above.
+5. **The DC normalisation in `fir_from_curve` came back.** Bug 1 was "fixed" twice
+   and both times incompletely: the replacement line `h /= h.sum()` normalises the
+   FIR to **0 dB at DC**, which for the *other*-stem curve (−9 dB at 95 Hz) shifts
+   the entire filter −9 dB. The peak normalisation that followed divided by exactly
+   1.0 and did nothing. Measured: a +6 dB flat request returned +0.00 dB. The EQ
+   was therefore wrong in **level** (though right in **shape**) in the version that
+   was first shipped. Fixed by normalising to the requested peak gain, with an
+   iterative correction for the windowing loss; the request now lands within
+   **0.04 dB** mean error across all 13 bands of the *other* curve (see
+   `work/selftest.py` section 1).
+6. **The denoiser suppressed held notes.** Minimum statistics take a low
+   percentile over time, so *any* sound that is continuously present is classified
+   as noise. A sustained note lost **−5.26 dB** - which is exactly the 200-1000 Hz
+   loss this document used to explain away as "the residual cost of the stem
+   split". It was not the split. Fixed with a tonalness detector (spectral
+   flatness per frame) that protects tonally dense bins: the held tone now loses
+   **−0.43 dB** while the hiss reduction stays at −8.2 dB.
+
+### 3.4b The voicing was correcting the wrong thing (measured, not guessed)
+
+The fixed restoration curve (`RESTORATION_CURVE_DB`) dips −2.5 dB at 400 Hz
+because these transfers sound boxy. But a *fixed* curve cannot know what the
+separation did. Measured on song 1, the difference between the stem sum and the
+original mix is:
+
+| band | 40 | 63 | 100 | 160 | 250 | 400 | 630 | 1 k | 2.5 k | 4 k |
+|---|---|---|---|---|---|---|---|---|---|---|
+| separation error (dB) | **+2.33** | **+2.32** | **+1.88** | +0.02 | −0.06 | +0.11 | −0.05 | −0.08 | −0.01 | +0.06 |
+
+So Demucs over-weights the bass by ~2.3 dB below 100 Hz and is otherwise flat to
+within 0.1 dB - while the fixed curve was cutting 2.5 dB where the source needs
+nothing, and leaving the actual error untouched. Measured cost of that mistake:
+**−1.5 dB of SNR in 200 Hz - 1 kHz**, the band the document blamed on the split.
+
+The chain now measures the separation error against the original mix and inverts it
+(`dsp.correction_from_source`), *before* the intended voicing is applied. This is
+self-calibrating and provably neutral when the separation is already balanced.
+After the correction the residual is +0.06/+0.36/+0.95 dB at 40/63/100 Hz and
+within 0.15 dB everywhere above 160 Hz.
 
 ### 3.5 Wow and flutter: measured, bounded, and only applied where it is provable
 
@@ -305,6 +358,75 @@ it declines on three of four songs, and that refusal is the correct outcome.
 `work/audit.py` uses the same estimator and reports `ok: false` with the reason
 instead of inventing a number.
 
+### 3.6 The neural top-octave reconstruction - what it actually does
+
+This is the part of the project that the brief is really about ("reconstruct
+frequencies that are gone"), so it gets its own section and its own honesty
+section.
+
+**Architecture.** A small PyTorch MLP maps a 24-band log-mel context window
+(160 ms of a 4.4-8.8 kHz band) to the 8.8-17.6 kHz band, per frame (5.8 ms hop),
+trained on the four songs' own upper octave: the source files carry real content
+up to ~16 kHz, so the *shallow* band of every song can teach the network what its
+own *deep* band is missing. Five models exist - one per stem plus one for the
+album - and they run per stem where the stems are clean enough and on the bus
+otherwise (`neural_air` in `restore.py`, 0.3 dose, high-passed at 5.7 kHz).
+
+**Measured. It is weaker than this document used to claim, and the honest number
+is the held-out one:**
+
+| model | old claim (training error) | honest held-out R² | MSE (dB²) | baseline MSE |
+|---|---|---|---|---|
+| master | 0.75 | **0.69** | 12.6 | 41.4 |
+| drums | 0.84 | **0.81** | 12.6 | — |
+| other | 0.74 | **0.62** | 17.4 | — |
+| bass | 0.63 | **0.47** | 8.3 | — |
+| vocals | 0.61 | **0.49** | 30.5 | — |
+
+Every one of the old numbers was **training error**: `train_model` and
+`train_per_instrument` fitted on the full frame set and only *afterwards* drew
+the test split. Worse, a random frame split is not a valid test at all on audio:
+neighbouring frames at a 5.8 ms hop correlate **0.948** (measured), so a random
+split leaks almost the entire answer. Both functions now split into **2-second
+block groups before training** and score on whole held-out blocks.
+
+**The harder finding.** Applied per song, the album-wise master net generalises
+poorly:
+
+| song | R² of the master net on that song |
+|---|---|
+| I Need You | 0.415 |
+| Lonesome Feeling | **−0.194** |
+| Put It On | **−0.129** |
+| Pussycat | −0.006 |
+
+That is not "weak", it is "does not transfer". The diagnosis is measurable: the
+predicted band mean tracks the target band mean almost exactly
+(−85.3/−73.0/−74.9/−76.5 dB predicted vs. −86.5/−72.0/−74.5/−76.6 dB target), i.e.
+**the network has largely learned to predict the average level of the band, not
+its detail.** On the songs it was trained on, that is enough to score 0.69 because
+the band mean explains most of the variance; on a new song the mean is wrong and
+the score collapses.
+
+**What this means for the masters.** The reconstructed top end is *band-energy
+correct* and only partly *event correct*: the 8-16 kHz envelope correlates
+0.586 / 0.727 / 0.190 / 0.234 with the 1-4 kHz envelope of the same master
+(measured on the delivered files), and the 6-16 kHz band is spectrally flat-ish
+rather than noise-like (flatness 0.118 / 0.188 / 0.056 / 0.068). It is an
+improvement over both a hiss wall and a shelf boost - it is structured, it moves
+with the music, and it does not sound like an exciter - but calling it
+"reconstruction of the missing frequencies" would overstate what a network
+trained on four songs can do. The larger part of the perceived top-end improvement
+in these masters comes from the **denoiser** (−4.5 to −5.8 dB noise floor in the
+top octave) plus the **transposer** element, not from the MLP.
+
+The dose was verified to be safe: at `amount=0.3` the network adds **−53.3 dB**
+(song 1) / **−49.0 dB** (song 3) relative to programme RMS, i.e. it cannot damage
+the mix. Its per-band envelope correlation with the true HF is 0.52 / 0.40 and is
+*independent of the dose* - the network's target is the band envelope, so turning
+it up adds level, not accuracy. That is why the dose stayed at 0.3: raising it
+would make the top end louder without making it more correct.
+
 ## 4. Before / after (measured)
 
 All figures from `work/summary.py` → `work/verify_summary.json`.
@@ -318,53 +440,70 @@ All figures from `work/summary.py` → `work/verify_summary.json`.
 
 ### Noise: the number this project got wrong for a long time
 
-Measured in **true quiet passages** (the quietest 10 % of frames), as SNR
-against a level-matched source, per band. Positive = cleaner than the source.
+Two different quantities are in play and conflating them produced three wrong
+statements in earlier versions of this document. They are kept apart here.
+
+**1. Absolute noise floor** (quietest 10 % of frames, LUFS-matched, per band,
+`dBFS`). This is the one that says whether the hiss is gone:
 
 | song | 40-200 | 200-1k | 1k-4k | 4k-8k | 8k-16k |
 |---|---|---|---|---|---|
-| I Need You | −1.3 | −0.7 | **+1.3** | **+2.1** | **+3.3** |
-| Lonesome Feeling | −0.1 | −2.2 | **+2.0** | **+1.5** | **+1.9** |
-| Put It On | **+0.9** | −0.9 | **+0.2** | −1.0 | **+0.7** |
-| Pussycat | **+2.3** | −1.2 | **+0.3** | −0.5 | −1.4 |
+| I Need You | +1.9 | −0.9 | +0.8 | −0.9 | **−4.5** |
+| Lonesome Feeling | −0.0 | −0.2 | **+2.2** | **+1.6** | **−5.8** |
+| Put It On | +1.2 | −1.3 | +0.6 | **+1.9** | **−4.9** |
+| Pussycat | +1.1 | −2.1 | +0.2 | +0.4 | +1.3 |
 
-Honest reading: the mid and top are cleaner than the source; the 40-200 Hz band
-is a wash (the acetate's LF rumble is partly *signal* for the bass, and removing
-it would remove the bass); and three of four songs still lose 1-2 dB around
-200-1000 Hz, because the separation does not perfectly reconstruct that region.
-That is the residual cost of the stem split, and it is 5-7 dB smaller than it was
-before the bus architecture.
+Negative = the floor went **down**. The top octave is 4.5-5.8 dB cleaner on three
+of the four songs; the 4-8 kHz region is +1 to +2 dB on two songs because the
+reconstructed harmonics (see below) live there and sit above the old noise floor
+by design.
 
-Measured on **absolute** noise floor (`work/audit.json`, quietest 5 % of frames,
-LUFS-matched), all four improve on the previous chain: +10.0/+7.4/+12.3 dB worse
-became +0.7/−1.1/+1.7 (I Need You); +6.6/+3.7/+9.9 became −1.6/−3.3/+0.3 (Put It
-On).
+**2. Level-matched SNR change per band** (`work/` measurement, both files brought
+to the same integrated loudness first):
 
-**A note on the 6-16 kHz band.** It is *higher* after restoration, and that is
-intended: the band now contains reconstructed harmonics of the music instead of a
-noise floor. What matters is that it is *structured*: the spectral flatness of the
-band falls (source → output: 0.51 → 0.26, 0.66 → 0.46, 0.35 → 0.28, 0.08 → 0.21)
-and its envelope correlates **0.71-0.93** with the real 8-16 kHz content of the
-original transfer. A generator that ignores the music cannot do that. The HF
-"reach" figure is the 90 dB bandwidth, not the extent of musical content: it grows
-modestly (15.8 → 16-18 kHz) because the network reconstructs real harmonics, not a
-hiss wall - the previous chain reported 22.05 kHz for all four, which was the
-network's noise floor.
+| song | 40-200 | 200-1k | 1k-4k | 4k-8k | 8k-16k |
+|---|---|---|---|---|---|
+| I Need You | −2.6 | −0.7 | +0.0 | **+2.6** | **+3.4** |
+| Lonesome Feeling | +0.4 | −1.4 | −1.8 | −1.5 | +0.4 |
+| Put It On | −0.7 | −0.4 | −0.1 | −1.1 | **+1.2** |
+| Pussycat | −1.0 | +0.2 | +0.6 | −0.1 | −1.0 |
 
-**Octave balance** (1/1-octave, relative to the mean of 200-800 Hz;
-`work/verify_summary.json` has all four songs):
+Honest reading, and it is not all good:
 
-| | 63 | 100 | 250 | 630 | 1 k | 1.6 k | 2.5 k | 4 k | 6.3 k | 8 k | 10 k | 12.5 k |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Put It On — source | −0.6 | +4.4 | +0.2 | −1.7 | −4.7 | −9.7 | −7.7 | −12.4 | −26.6 | −30.7 | −36.5 | −42.0 |
-| Put It On — restored | +1.4 | +5.2 | −1.8 | +0.2 | −2.1 | −4.7 | −3.3 | −7.0 | −22.1 | −28.6 | −37.5 | −40.8 |
+* The **top end is genuinely cleaner** where the reconstruction worked (I Need
+  You +3.4 dB SNR in 8-16 kHz, Put It On +1.2 dB).
+* **200 Hz - 4 kHz is a wash to slightly worse** (−1.9 to +0.6 dB). This is the
+  band the previous version of this document claimed to have *improved* by 1-3 dB.
+  That claim came from an SNR proxy that was not level-matched and from a fixed
+  voicing curve that cut 2.5 dB where the source needed nothing (§3.4b). Corrected,
+  the honest number is "no significant change".
+* **40-200 Hz loses 1-2.6 dB on two songs.** The separation over-weights the bass
+  by +2.3 dB; `correction_from_source` removes that, but the removal also takes
+  some of the acetate rumble that was part of the bass sound.
 
-Read it as: the **160 Hz-4 kHz region is now continuous and smooth** (the 1 k dip
-and the 1.6-4 kHz hole are filled - that is the "boxy, dull, shouty" sound
-disappearing), the 250-630 Hz box is pulled back, and the 6.3-8 kHz band is
-*quieter* than the source, because what was there was noise.
+**A note on the 6-16 kHz band.** It is *higher* after restoration on some songs,
+and that is intended: the band now contains reconstructed harmonics of the music
+instead of only a noise floor. What matters is that it is *structured*: spectral
+flatness of 6-16 kHz is **0.118 / 0.188 / 0.056 / 0.068** (white noise would be
+~0.55-0.6), and the 8-16 kHz envelope correlates **0.586 / 0.727 / 0.190 / 0.234**
+with the 1-4 kHz envelope of the same master. That correlation is the honest
+number and it is *weaker* than the 0.71-0.93 claimed earlier - that figure came
+from the version with the broken DC normalisation. Songs 3 and 4 correlate low:
+their reconstruction is band-energy accurate but not event-accurate, i.e. it adds
+a plausible top end rather than a *correct* one. Saying otherwise would be
+selling you a measurement that does not exist.
 
-Crest factor going *up* while loudness also goes up (Lonesome Feeling: 10.9 → 13.3 dB
+The HF "reach" figure is the 90 dB bandwidth, not the extent of musical content:
+it grows modestly (15.8 → 18-19 kHz).
+
+**Octave balance.** The residual error against the source, in dB relative to the
+200-800 Hz reference, is now **+2.4/+2.3/−0.5/+0.8/+1.8/+2.2/+2.5/+2.8** at
+63/100/250/630/1k/1.6k/2.5k/4k for I Need You. That residual is dominated by
+Demucs's bass overhang at 63-100 Hz and by the +1..+3 dB voicing lift above 1 kHz,
+which is *intended* (it is the "thin top" correction), not an error. The 250-630 Hz
+box is pulled back by 0.5-0.7 dB on every song, consistently.
+
+Crest factor going *up* while loudness also goes up (Lonesome Feeling: 10.9 → 13.2 dB
 crest at −8.45 → −12.00 LUFS) is the signature of the source being squashed and
 clipped: the restored master is at the same perceived level but needs far less
 dynamic compression to get there.
@@ -437,6 +576,9 @@ restored/
 docs/
   <song>_comparison.png                 spectrogram / spectrum / noise / stereo
 RESTORATION.md                          this report
+VERIFICATION.md                         re-verification log: every check against
+                                        a known answer, and what it changed
+work/selftest.py                        permanent unit tests (exit 0 == all pass)
 work/                                   the whole toolchain (see §7)
 work/bwe.py                             neural top-octave reconstruction (PyTorch)
 work/models/bwe_*.pt                    the five trained models (vocals/drums/bass/other/master)
@@ -458,6 +600,7 @@ python3 -m venv .venv && .venv/bin/pip install numpy scipy soundfile \
 python work/analyze.py         # forensic report of the sources      -> work/analysis.json
 python work/diagnose.py        # deep diagnostics + plots             -> work/diagnose.json
 python work/run_separation.py  # htdemucs stems (CPU, ~4 min/song)    -> work/stems/
+python work/selftest.py        # unit checks, all against known answers (2 s)
 python work/bwe.py             # train the top-octave networks        -> work/models/bwe*.pt
 ./work/run_all_restore.sh      # restoration + mastering, 1 process per song
 python work/summary.py         # before/after table                   -> work/verify_summary.json

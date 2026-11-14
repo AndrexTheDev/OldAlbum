@@ -1,32 +1,41 @@
 {
+ "note": "Held-out scores only. Every r2 below was produced by splitting the frames into 2-second block groups BEFORE training; a random frame split is invalid for audio because neighbouring frames (5.8 ms hop) correlate 0.948. The previous version of this file reported training error (vocals 0.614, drums 0.838, bass 0.63, other 0.739, master 0.75).",
+ "split": "grouped 2 s blocks (no frame-level leakage)",
  "vocals": {
-  "frames": 66616,
-  "r2": 0.614,
-  "mse_db2": 22.92,
-  "time_s": 646.7
+  "frames": 66600,
+  "r2": 0.493,
+  "mse_db2": 30.45,
+  "time_s": 855.4
  },
  "drums": {
-  "frames": 27173,
-  "r2": 0.838,
-  "mse_db2": 11.59,
-  "time_s": 247.3
+  "frames": 27182,
+  "r2": 0.81,
+  "mse_db2": 12.62,
+  "time_s": 344.4
  },
  "bass": {
-  "frames": 21425,
-  "r2": 0.63,
-  "mse_db2": 6.56,
-  "time_s": 194.9
+  "frames": 21420,
+  "r2": 0.468,
+  "mse_db2": 8.32,
+  "time_s": 276.1
  },
  "other": {
-  "frames": 31766,
-  "r2": 0.739,
-  "mse_db2": 13.23,
-  "time_s": 301.2
+  "frames": 31769,
+  "r2": 0.622,
+  "mse_db2": 17.36,
+  "time_s": 392.9
  },
  "master": {
-  "frames": 31262,
-  "r2": 0.75,
-  "mse_db2": 11.2,
-  "note": "trained on the full mix, used at the master bus"
- }
+  "frames": null,
+  "r2": 0.69,
+  "mse_db2": 12.6,
+  "baseline_mse_db2": 41.4
+ },
+ "cross_song_r2_master_net": {
+  "1_I_Need_You": 0.415,
+  "2_Lonesome_Feeling": -0.194,
+  "3_Put_It_On": -0.129,
+  "4_Whats_New_Pussycat": -0.006
+ },
+ "diagnosis": "The master net predicts the band mean almost exactly (predicted -85.3/-73.0/-74.9/-76.5 dB vs target -86.5/-72.0/-74.5/-76.6 dB) and therefore does not transfer to an unseen song. Use the per-instrument nets per stem."
 }

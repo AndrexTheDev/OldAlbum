@@ -324,6 +324,10 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
     n = len(raw['vocals'])
     src, _ = load_mono(f'{ROOT}/work/prep/{tag}.wav')
     src = src[:n] if len(src) >= n else np.pad(src, (0, n - len(src)))
+    # `src` is the original mix and stays untouched (it is also the A/B reference);
+    # `src_mono` is its mono sum, used further down to measure what the separation
+    # did to the octave balance.
+    src_mono = src.mean(axis=1) if src.ndim == 2 else src
     info['duration_s'] = round(n / SR, 3)
     info['source'] = {'lufs': round(loudness(src), 2), 'rms_db': round(rms_db(src), 2),
                       'bands': band_edges(src)}
@@ -383,6 +387,20 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
     stage(core, 'B2_denoise')
 
     # =========================================================== BUS: voicing
+    # Two steps, and the order matters:
+    #  (a) undo what the *separation* did to the balance, measured against the
+    #      original mix. This is not a taste decision - it is a measurement, and
+    #      it is provably neutral when the separation was already balanced.
+    #  (b) apply the intended restoration voicing on top of that.
+    # Before this, step (a) did not exist and the fixed voicing curve of step (b)
+    # was doing a job it could not do: it cut 2.5 dB at 400 Hz, where the source
+    # needs nothing (+0.1 dB), and left the +2.3 dB of bass overhang from Demucs
+    # untouched. Measured cost: 1.5 dB of SNR in 200 Hz - 1 kHz.
+    core, sep_curve, sep_keys, sep_delta = dsp.correction_from_source(
+        core, src_mono, SR, fmin=32.0, fmax=6300.0, max_db=rec.get('sep_fix_db', 3.0))
+    info['separation_correction_db'] = {int(k): round(v, 2) for k, v in sep_curve.items()}
+    stage(core, 'B3a_sep_fix')
+
     core, curve, before, after = dsp.match_target(
         core, SR, strength=rec['tilt'], fmin=30.0, fmax=6300.0,
         max_boost=rec['max_boost'], max_cut=rec['max_cut'])
@@ -471,13 +489,31 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
         if abs(loudness(st) - rec['target_lufs']) < 0.02:
             break
 
-    # last true-peak audit; a pure gain change above can only have lowered it
-    if true_peak_db(st) > rec['ceiling']:
-        st, _ = limiter(st, SR, ceiling_db=rec['ceiling'], lookahead_ms=4.0,
-                        release_ms=150)
-        cur = loudness(st)
-        if cur > rec['target_lufs']:
-            st = (st * (10 ** ((rec['target_lufs'] - cur) / 20.0))).astype(np.float32)
+    # ---- final catch-up: hit BOTH targets, not just loudness -----------------
+    # The loop above pulls the loudness *down* after limiting without re-limiting,
+    # which is safe. But when the programme comes out below target it has to be
+    # gained *up*, and then the true peak rises with it. Song 2 did exactly that
+    # and shipped at -1.17 dBTP instead of -1.00. So: bound the gain increase by
+    # the headroom left to the ceiling, and re-limit afterwards if anything is
+    # still over. Two rounds are enough because the limiter only ever lowers peaks,
+    # so the second round can only need a tiny correction.
+    for _ in range(3):
+        cur_l = loudness(st)
+        cur_tp = true_peak_db(st)
+        need = rec['target_lufs'] - cur_l
+        head = rec['ceiling'] - cur_tp
+        if abs(need) < 0.02 and cur_tp <= rec['ceiling'] + 1e-3:
+            break
+        gain = min(need, head) if need > 0 else need
+        if abs(gain) > 1e-4:
+            st = (st * (10 ** (gain / 20.0))).astype(np.float32)
+        if true_peak_db(st) > rec['ceiling'] + 1e-3:
+            st, _ = limiter(st, SR, ceiling_db=rec['ceiling'], lookahead_ms=4.0,
+                            release_ms=150)
+        # a limit can push loudness up: only ever pull down from here
+        over = loudness(st) - rec['target_lufs']
+        if over > 0.02:
+            st = (st * (10 ** (-over / 20.0))).astype(np.float32)
 
     info['master'] = {
         'lufs': round(loudness(st), 2),

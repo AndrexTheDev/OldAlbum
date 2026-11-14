@@ -393,16 +393,25 @@ def train_model(verbose=True):
         if verbose:
             print(f'  {tag:24} {len(X):5d} reliable frames', flush=True)
     X = np.vstack(Xs); Y = np.vstack(Ys)
-    mu = X.mean(0, keepdims=True); sd = X.std(0, keepdims=True) + 1e-6
-    my = Y.mean(0, keepdims=True)
-    t0 = time.time()
-    net = train((X - mu) / sd, Y - my, epochs=120, verbose=verbose)
-    # honest held-out score
+    # Split by group and *before* training: frame-level splits leak here (frames
+    # are 5.8 ms apart and neighbouring frames correlate 0.948), and training on
+    # the full set while scoring a subset reports training error, not test error.
+    G = 344
+    nblk = len(X) // G
     rng = np.random.default_rng(1)
-    idx = rng.permutation(len(X)); te = idx[:len(X) // 5]
+    blocks = rng.permutation(nblk)
+    te_blk = set(blocks[:max(1, nblk // 5)].tolist())
+    te = np.concatenate([np.arange(b * G, (b + 1) * G) for b in sorted(te_blk)])
+    te = te[te < len(X)]
+    tr = np.setdiff1d(np.arange(len(X)), te)
+    mu = X[tr].mean(0, keepdims=True); sd = X[tr].std(0, keepdims=True) + 1e-6
+    my = Y[tr].mean(0, keepdims=True)
+    t0 = time.time()
+    net = train((X[tr] - mu) / sd, Y[tr] - my, epochs=120, verbose=verbose)
+    # honest held-out score on data the model has never seen
     pred = predict(net, ((X[te] - mu) / sd)) + my
     mse = float(np.mean((pred - Y[te]) ** 2))
-    base = float(np.mean((Y[np.setdiff1d(idx, te)].mean(0) - Y[te]) ** 2))
+    base = float(np.mean((Y[tr].mean(0) - Y[te]) ** 2))
     import torch
     torch.save({'state': net.state_dict(),
                 'norm': [mu.tolist(), sd.tolist(), my.tolist()],
@@ -410,7 +419,8 @@ def train_model(verbose=True):
                f'{ROOT}/work/models/bwe.pt')
     rep = {'frames': int(len(X)), 'time_s': round(time.time() - t0, 1),
            'heldout_mse_db2': mse, 'baseline_mse_db2': base,
-           'r2': round(1 - mse / base, 3)}
+           'r2': round(1 - mse / base, 3),
+           'split': 'grouped 2 s blocks (no frame-level leakage)'}
     json.dump(rep, open(f'{ROOT}/work/bwe_report.json', 'w'), indent=1)
     if verbose:
         print('  held-out: MSE %.1f dB^2 (baseline %.1f) -> R2 %.2f in %.0f s'
@@ -457,24 +467,40 @@ def train_per_instrument(verbose=True):
             X, Y = frame_pairs(x, M, edges)
             Xs.append(X); Ys.append(Y)
         X = np.vstack(Xs); Y = np.vstack(Ys)
-        mu = X.mean(0, keepdims=True); sd = X.std(0, keepdims=True) + 1e-6
-        my = Y.mean(0, keepdims=True)
-        t0 = time.time()
-        net = train((X - mu) / sd, Y - my, epochs=120, verbose=False)
+        # ---- honest split, *before* training ---------------------------------
+        # Two bugs lived here and both inflated every R2 this project published:
+        #  1. `train()` was called on the full X, and the test split was drawn
+        #     afterwards - so the model was scored on frames it had trained on.
+        #  2. Even with a proper split, frames are 5.8 ms apart and neighbouring
+        #     frames correlate 0.948, so a random frame split leaks: the test set
+        #     is full of near-duplicates of the training set.
+        # The split is therefore by *group* (2-second blocks stay together) and the
+        # model never sees the test blocks.
+        G = 344                                  # 2 s at hop 256
+        nblk = len(X) // G
         rng = np.random.default_rng(1)
-        idx = rng.permutation(len(X)); te = idx[:len(X) // 5]
+        blocks = rng.permutation(nblk)
+        te_blk = set(blocks[:max(1, nblk // 5)].tolist())
+        te = np.concatenate([np.arange(b * G, (b + 1) * G) for b in sorted(te_blk)])
+        te = te[te < len(X)]
+        tr = np.setdiff1d(np.arange(len(X)), te)
+        mu = X[tr].mean(0, keepdims=True); sd = X[tr].std(0, keepdims=True) + 1e-6
+        my = Y[tr].mean(0, keepdims=True)
+        t0 = time.time()
+        net = train((X[tr] - mu) / sd, Y[tr] - my, epochs=120, verbose=False)
         pred = predict(net, (X[te] - mu) / sd) + my
         mse = float(np.mean((pred - Y[te]) ** 2))
-        base = float(np.mean((Y[np.setdiff1d(idx, te)].mean(0) - Y[te]) ** 2))
+        base = float(np.mean((Y[tr].mean(0) - Y[te]) ** 2))
         torch.save({'state': net.state_dict(),
                     'norm': [mu.tolist(), sd.tolist(), my.tolist()],
                     'n_in': int(X.shape[1]), 'n_out': int(Y.shape[1])},
                    f'{ROOT}/work/models/bwe_{nm}.pt')
         report[nm] = {'frames': int(len(X)), 'r2': round(1 - mse / base, 3),
-                      'mse_db2': round(mse, 2), 'time_s': round(time.time() - t0, 1)}
+                      'mse_db2': round(mse, 2), 'time_s': round(time.time() - t0, 1),
+                      'split': 'grouped 2 s blocks (no frame-level leakage)'}
         if verbose:
             print(f'  {nm:7} {len(X):6d} frames  R2 {report[nm]["r2"]:.2f}  '
-                  f'MSE {mse:5.2f} dB^2  ({report[nm]["time_s"]:.0f}s)', flush=True)
+                  f'MSE {report[nm]["mse_db2"]:5.2f} dB^2  ({report[nm]["time_s"]:.0f}s)', flush=True)
     json.dump(report, open(f'{ROOT}/work/bwe_report.json', 'w'), indent=1)
     return report
 
