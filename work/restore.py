@@ -18,6 +18,7 @@ import soundfile as sf
 from scipy import signal as sg
 sys.path.insert(0, '/home/user/OldAlbum/work')
 import dsp
+import image
 import bwe
 from dsp import (db, rms_db, peak_db, declick, decrackle, denoise, remove_hum,
                  block_dc_subsonic, eq_curve, compress, limiter, harmonic_excite,
@@ -31,56 +32,62 @@ STEMS = ('vocals', 'drums', 'bass', 'other')
 # 'balance_db' = intended level change of each stem relative to its separated
 #                 level (CLAMPED to +-5 dB so the original blend survives)
 RECIPES = {
+    # 'tilt'      : overall voicing strength (matches the modern 200-800 Hz
+    #               referenced curve; see RESTORATION.md)
+    # 'balance_db': level of each stem, clamped to +-5 dB
+    # 'dn_bus'    : suppression of the single denoiser that runs on the bus
+    # 'par'       : share of the parallel compressed copy on the bus
     '1_I_Need_You': dict(
         hum=50.0,
         balance_db={'vocals': 1.5, 'drums': 5.0, 'bass': -3.0, 'other': 0.5},
-        vocal=dict(hp=100.0, presence=2.2, air=4.5, excite=1.9, deess=5700.0),
-        drums=dict(hp=35.0, punch=2.6, excite=1.3),
-        bass=dict(hp=30.0, lp=1400.0, lowmid=1.6, harm=0.28),
-        other=dict(hp=95.0, excite=1.9, width=4.0),
-        tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=5700.0,
-        air_noise_cut_db=-12.0, air_db=-17.0, air_top=12000.0,
-        air_vocals=0.0, air_drums=0.0, air_other=0.0, air_master=0.3,
-        dn_vocals=10.0, dn_drums=8.0, dn_other=11.0, dn_master=9.0,
+        tilt=1.0, max_boost=6.0, max_cut=8.0,
+        dn_bus=11.0, par=0.16,
+        air_from_hz=5700.0, air_noise_cut_db=-12.0, air_master=0.3,
         target_lufs=-12.0, ceiling=-1.0,
     ),
     '2_Lonesome_Feeling': dict(
         hum=50.0,
         balance_db={'vocals': 1.5, 'drums': 3.0, 'bass': -3.0, 'other': 0.5},
-        vocal=dict(hp=100.0, presence=2.0, air=4.0, excite=1.8, deess=5700.0),
-        drums=dict(hp=35.0, punch=2.2, excite=1.2),
-        bass=dict(hp=30.0, lp=1400.0, lowmid=1.5, harm=0.26),
-        other=dict(hp=95.0, excite=1.8, width=3.6),
-        tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=5700.0,
-        air_noise_cut_db=-12.0, air_db=-17.0, air_top=12000.0,
-        air_vocals=0.0, air_drums=0.0, air_other=0.0, air_master=0.3,
+        tilt=1.0, max_boost=6.0, max_cut=8.0,
+        dn_bus=11.0, par=0.16,
+        air_from_hz=5700.0, air_noise_cut_db=-12.0, air_master=0.3,
         target_lufs=-12.0, ceiling=-1.0,
     ),
     '3_Put_It_On': dict(
         hum=50.0,
         balance_db={'vocals': 1.5, 'drums': 2.5, 'bass': -3.0, 'other': 0.5},
-        vocal=dict(hp=100.0, presence=2.1, air=4.2, excite=1.9, deess=5700.0),
-        drums=dict(hp=35.0, punch=2.4, excite=1.3),
-        bass=dict(hp=30.0, lp=1400.0, lowmid=1.55, harm=0.27),
-        other=dict(hp=95.0, excite=1.9, width=3.8),
-        tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=5700.0,
-        air_noise_cut_db=-12.0, air_db=-17.0, air_top=12000.0,
-        air_vocals=0.0, air_drums=0.0, air_other=0.0, air_master=0.3,
+        tilt=1.0, max_boost=6.0, max_cut=8.0,
+        dn_bus=11.0, par=0.16,
+        air_from_hz=5700.0, air_noise_cut_db=-12.0, air_master=0.3,
         target_lufs=-12.0, ceiling=-1.0,
     ),
     '4_Whats_New_Pussycat': dict(
         hum=50.0,
         balance_db={'vocals': 1.5, 'drums': 2.0, 'bass': -3.0, 'other': 1.0},
-        vocal=dict(hp=100.0, presence=1.9, air=3.8, excite=1.8, deess=5700.0),
-        drums=dict(hp=35.0, punch=2.0, excite=1.1),
-        bass=dict(hp=30.0, lp=1400.0, lowmid=1.4, harm=0.25),
-        other=dict(hp=95.0, excite=1.8, width=3.4),
-        tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=5700.0,
-        air_noise_cut_db=0.0, air_db=-17.0, air_top=12000.0,
-        air_vocals=0.0, air_drums=0.0, air_other=0.0, air_master=0.3,
-        dn_vocals=9.0, dn_drums=7.0, dn_other=10.0, dn_master=8.0,
+        tilt=1.0, max_boost=6.0, max_cut=8.0,
+        dn_bus=10.0, par=0.16,
+        air_from_hz=5700.0, air_noise_cut_db=0.0, air_master=0.3,
         target_lufs=-12.0, ceiling=-1.0,
     ),
+}
+
+# stem-specific minimum-phase corrections, in Hz: each stem gets only the
+# filtering it truly needs. Deliberately short: every extra filter is another
+# chance to smear a transient or to lift a noise floor.
+STEM_CHAIN = {
+    #             high-pass  low-pass  extra EQ (freqs, gains)
+    'vocals': dict(hp=100.0, lp=17500.0,
+                   eq=([260, 420, 700, 1100, 2000, 3000, 4200, 5600, 7200, 9500, 12000, 16000],
+                       [-2.0, -1.2, 0.4, 0.6, 1.3, 2.0, 1.9, 1.4, 1.2, 1.4, 1.2, 0.9])),
+    'drums': dict(hp=35.0, lp=17500.0,
+                  eq=([40, 60, 85, 120, 180, 300, 600, 1200, 2500, 4000, 6000, 9000, 13000, 16000],
+                      [1.0, 2.2, 1.4, -0.6, -1.2, -0.6, 0.4, 0.9, 1.4, 1.5, 1.7, 1.9, 2.0, 1.6])),
+    'bass': dict(hp=30.0, lp=1400.0,
+                 eq=([28, 40, 52, 65, 80, 100, 130, 170, 220, 300, 450, 700, 1000, 1400],
+                     [-4.0, 0.0, 1.0, 0.9, 0.8, 0.6, 0.4, 0.0, -1.0, -1.6, -2.2, -3.4, -6.0, -12.0])),
+    'other': dict(hp=95.0, lp=17500.0,
+                  eq=([150, 260, 420, 700, 1200, 2000, 3200, 4600, 6500, 9000, 12000, 16000],
+                      [-1.0, -0.6, 0.2, 0.6, 0.8, 1.1, 1.4, 1.5, 1.7, 2.0, 2.2, 1.8])),
 }
 
 
@@ -157,6 +164,21 @@ def soft_comp(x, sr=SR, thresh_offset=-10.0, ratio=2.0, attack_ms=12.0,
     return y, gr
 
 
+def parallel_comp(x, sr=SR, thresh_offset=-10.0, ratio=2.0, attack_ms=18.0,
+                  release_ms=200.0, mix=0.25):
+    """Parallel ('New York') compression: dry + a compressed copy, level-matched.
+
+    Unlike `soft_comp` this never applies make-up gain to the *whole* signal, so
+    quiet passages keep their level (and their noise floor) while the loud parts
+    get support from the compressed copy. `mix` is the share of that copy.
+    """
+    thr = rms_db(x) + thresh_offset
+    par, gr = compress(x, sr, thresh_db=thr, ratio=ratio, attack_ms=attack_ms,
+                       release_ms=release_ms, makeup_db=0.0, knee_db=10)
+    par = norm_db(par, rms_db(x) - 6.0)
+    return (x * (1.0 - mix) + par * mix).astype(np.float32), gr
+
+
 def band_edges(x, sr=SR):
     f, P = sg.welch(x, sr, nperseg=8192)
     Pdb = 10 * np.log10(np.maximum(P, 1e-20))
@@ -206,6 +228,19 @@ def k5(x, label=''):
     ref_ = (f2_ >= 200) & (f2_ < 800)
     h15 = round(10 * np.log10(max(float(P2_[hi_].sum()), 1e-30) / max(float(P2_[ref_].sum()), 1e-30)), 1)
     print('  k5 %-22s %8.2f   n6 %6.1f   h15 %6.1f' % (label, k, n6, h15), flush=True)
+
+
+_STAGE_DIR = _os.environ.get('RESTORE_STAGE_DIR')
+
+
+def stage(x, label):
+    """Write an intermediate stage to disk if RESTORE_STAGE_DIR is set."""
+    if not _STAGE_DIR:
+        return
+    import soundfile as _sf
+    _os.makedirs(_STAGE_DIR, exist_ok=True)
+    a = np.asarray(x, dtype=np.float32)
+    _sf.write(_os.path.join(_STAGE_DIR, label + '.wav'), a, SR, subtype='FLOAT')
 
 
 def wb_declick(x, sr=SR, freq=6000.0, amount_db=3.0, thresh_db=9.0):
@@ -291,206 +326,158 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
     src = src[:n] if len(src) >= n else np.pad(src, (0, n - len(src)))
     info['duration_s'] = round(n / SR, 3)
     info['source'] = {'lufs': round(loudness(src), 2), 'rms_db': round(rms_db(src), 2),
-                      'peak_db': round(peak_db(src), 2), 'bands': band_edges(src)}
+                      'bands': band_edges(src)}
     info['stems_in_rms_db'] = {k: round(rms_db(v), 2) for k, v in raw.items()}
 
+    # =========================================================== PER STEM
+    # The chain here is deliberately *short*. Each stage below is in because it
+    # was measured to help; nothing is in because it is traditional.
+    #
+    # What is NOT here any more, and why (all measured, see RESTORATION.md):
+    #  * per-stem spectral denoising: three of the four stems are pure bleed of
+    #    the same noise, so cleaning them separately costs signal three times.
+    #    One denoiser on the bus removes the same noise once.
+    #  * per-stem insert compression with automatic make-up: it raises everything
+    #    below the threshold, i.e. it pumped the gaps back up (+5 dB on the bass
+    #    floor) and ate the programme's own dynamics.
+    #  * harmonic excitation / "air" per stem: measured to add sibilance-like
+    #    sidebands, not harmonics; the top octave is reconstructed once, on the
+    #    bus, by the trained network.
+    stem = {}
     proc = {}
+    for k in STEMS:
+        x = raw[k]
+        x, nclick = declick(x, SR, k=7.0)
+        x, hum = remove_hum(x, base=rec.get('hum', 50.0))
+        ch = STEM_CHAIN[k]
+        x = block_dc_subsonic(x, SR, hp=ch['hp'], lp=ch['lp'])
+        x = decrackle(x, SR, thresh_db=-26.0, mix=0.5)
+        x = eq_curve(x, ch['eq'][0], ch['eq'][1])
+        x = wb_declick(x, SR, freq=6000.0)
+        stem[k] = x
+        proc[k] = {'declicked': int(nclick), 'hum_notches': hum}
+        stage(x, 'S1_' + k)
 
-    # ---------------------------------------------------------- VOCALS
-    v = raw['vocals']
-    v, nclick = declick(v, SR, k=7.0)
-    v, hum = remove_hum(v, base=rec['hum'])
-    v = block_dc_subsonic(v, SR, hp=rec['vocal']['hp'])
-    v = decrackle(v, SR, thresh_db=-26.0, mix=0.6)
-    p = rec['vocal']['presence']
-    v = eq_curve(v, [45, 100, 165, 260, 420, 700, 1100, 2000, 3000, 4200,
-                     5600, 7200, 9500, 12000, 16000, 20000],
-                 [-8, -2.5, -3.0, -2.0, -0.6, 0.6, 0.8, p * 0.6, p, p * 0.8,
-                      p * 0.5, 1.0, rec['vocal']['air'] * 0.8, rec['vocal']['air'],
-                      rec['vocal']['air'] * 1.1, rec['vocal']['air'] * 0.4])
-    # denoise AFTER the tonal lift, otherwise we amplify tape/quantisation hiss
-    v = denoise(v, SR, reduction_db=rec.get('dn_vocals', 6.0), floor_db=-22.0)
-    v = deess(v, SR, freq=rec['vocal']['deess'])
-    # NOTE: the neural reconstruction is deliberately NOT applied per stem.
-    # Stacking four independent reconstructions on top of each other gives a
-    # spectrally flat, noise-like top end (measured: flatness 0.21 -> 0.38),
-    # which is exactly the "effect" sound that must be avoided. The reconstruction
-    # happens once, on the full mix, where the model sees the complete programme.
-    v = wb_declick(v, SR, freq=rec.get('wb_declick_hz', 6000.0))
-    v = transient_shape(v, SR, attack_db=1.4, sustain_db=-0.7)
-    v, gr = soft_comp(v, SR, -9.0, 2.2, 8, 150, makeup=0)
-    k5(v, 'vocals_out')
-    proc['vocals'] = {'declicked': int(nclick), 'hum_notches': hum, 'comp_gr_db': round(gr, 2)}
-
-    # ---------------------------------------------------------- DRUMS
-    d = raw['drums']
-    d, nclick = declick(d, SR, k=7.0)
-    d, hum = remove_hum(d, base=rec['hum'])
-    d = block_dc_subsonic(d, SR, hp=rec['drums']['hp'], lp=17500.0)
-    d = decrackle(d, SR, thresh_db=-26.0, mix=0.5)
-    d = transient_shape(d, SR, attack_db=rec['drums']['punch'], sustain_db=-1.4)
-    d = eq_curve(d, [40, 60, 85, 120, 180, 300, 600, 1200, 2500, 4000,
-                     6000, 9000, 13000, 16000],
-                 [1.0, 2.2, 1.4, -0.6, -1.2, -0.6, 0.4, 0.9, 1.4, 1.5, 1.7, 1.9, 2.0, 1.6])
-    d = denoise(d, SR, reduction_db=rec.get('dn_drums', 4.0), floor_db=-22.0)
-    d = wb_declick(d, SR, freq=rec.get('wb_declick_hz', 6000.0))
-    d = hf_control(d, SR, 6500.0, -34.0, 3.0)
-    d, gr = soft_comp(d, SR, -8.0, 2.4, 14, 200)
-    k5(d, 'drums_out')
-    proc['drums'] = {'declicked': int(nclick), 'hum_notches': hum, 'comp_gr_db': round(gr, 2)}
-
-    # ---------------------------------------------------------- BASS
-    b = raw['bass']
-    b, nclick = declick(b, SR, k=7.0)
-    b, hum = remove_hum(b, base=rec['hum'])
-    b = block_dc_subsonic(b, SR, hp=rec['bass']['hp'], lp=rec['bass']['lp'])
-    b = decrackle(b, SR, thresh_db=-28.0, mix=0.5)
-    lm = rec['bass']['lowmid']
-    # the separated bass has a huge 40-60 Hz bump and a 150-250 Hz 'mud' swell
-    b = eq_curve(b, [28, 40, 52, 65, 80, 100, 130, 170, 220, 300, 450, 700, 1000, 1400],
-                 [-4, 0.0, 1.0, lm, lm, lm * 0.7, 0.6, 0.0, -1.4, -2.4, -3.4,
-                  -5.0, -8.0, -12.0])
-    # 2nd-harmonic bass enhancement so the line reads on small speakers
-    harm = sg.filtfilt(*sg.butter(4, [70 / (SR / 2), 400 / (SR / 2)], 'band'), np.abs(b))
-    b = (b + rec['bass']['harm'] * harm.astype(np.float32)).astype(np.float32)
-    b, gr = soft_comp(b, SR, -8.0, 2.0, 18, 210)
-    k5(b, 'bass_out')
-    proc['bass'] = {'declicked': int(nclick), 'hum_notches': hum, 'comp_gr_db': round(gr, 2)}
-
-    # ---------------------------------------------------------- OTHER
-    o = raw['other']
-    o, nclick = declick(o, SR, k=7.0)
-    o, hum = remove_hum(o, base=rec['hum'])
-    o = block_dc_subsonic(o, SR, hp=rec['other']['hp'])
-    o = decrackle(o, SR, thresh_db=-26.0, mix=0.5)
-    o = eq_curve(o, [95, 150, 260, 420, 700, 1200, 2000, 3200, 4600, 6500,
-                     9000, 12000, 16000],
-                 [-9, -3.5, -1.2, 0.2, 0.6, 0.8, 1.1, 1.4, 1.5, 1.7, 2.0, 2.2, 1.8])
-    o = denoise(o, SR, reduction_db=rec.get('dn_other', 8.0), floor_db=-22.0)
-    o = wb_declick(o, SR, freq=rec.get('wb_declick_hz', 6000.0))
-    o = transient_shape(o, SR, attack_db=0.8, sustain_db=-0.4)
-    o = hf_control(o, SR, 6500.0, -30.0, 2.5)
-    o, gr = soft_comp(o, SR, -9.0, 1.9, 20, 240)
-    k5(o, 'other_out')
-    proc['other'] = {'declicked': int(nclick), 'hum_notches': hum, 'comp_gr_db': round(gr, 2)}
-
-    # ---------------------------------------------------------- BALANCE
-    stem = {'vocals': v, 'drums': d, 'bass': b, 'other': o}
-    for k in stem:                       # clamp the requested change
+    # =========================================================== BALANCE
+    # Only the two edges of the spectrum are nudged; the mid balance the producer
+    # chose stays. A wider change would be a remix, not a restoration.
+    for k in stem:
         g = float(np.clip(rec['balance_db'][k], -5.0, 5.0))
         stem[k] = (stem[k] * (10 ** (g / 20.0))).astype(np.float32)
-    info['stems_out_rms_db'] = {k: round(rms_db(s), 2) for k, s in stem.items()}
+    info['stems_out_rms_db'] = {k: round(rms_db(v), 2) for k, v in stem.items()}
 
-    # match the sum to the original program level, then keep headroom for mastering
-    s_sum = sum(stem.values())
-    gain = (rms_db(src) - 3.0) - rms_db(s_sum)
-    stem = {k: (s * (10 ** (gain / 20.0))).astype(np.float32) for k, s in stem.items()}
+    # Sum to the original programme level; this is also the point where the
+    # separated stems become one signal again, so all bus processing below sees
+    # exactly the material the listener will hear.
+    core = sum(stem.values())
+    gain = rms_db(src) - rms_db(core)
+    core = (core * (10 ** (gain / 20.0))).astype(np.float32)
     info['balance_gain_db'] = round(gain, 2)
+    stage(core, 'B1_sum')
 
-    # ---------------------------------------------------------- STEREO IMAGE
-    # The sources are 1960s mono. A modern release needs a real stereo picture,
-    # but it must be built so that the MONO SUM stays intact (no comb filtering,
-    # no phase cancellation): everything we add is a pure *side* component
-    # (+d on the left, -d on the right), which cancels exactly in mono.
-    n = len(stem['vocals'])
+    # =========================================================== BUS: noise
+    # One denoiser for the whole programme. Minimum statistics over the full mix
+    # can tell "hiss in a gap" from "cymbals in a hit"; on a single stem it cannot,
+    # and the four independent estimates add up to more hiss than they remove.
+    core = denoise(core, SR, reduction_db=rec.get('dn_bus', 11.0), floor_db=-22.0)
+    stage(core, 'B2_denoise')
 
-    def side_from(sig, ms):
-        """Airy, high-passed delayed copy used only in the side channel."""
-        d = int(ms * 1e-3 * SR)
-        hp = sg.filtfilt(*sg.butter(2, 320 / (SR / 2), 'high'), sig).astype(np.float32)
-        out = np.zeros(n, dtype=np.float32)
-        if d < n:
-            out[d:] = hp[:n - d]
-        return out
-
-    core = stem['vocals'] + stem['drums'] + stem['bass']        # dead centre
-    bed = stem['other']
-    wgain = 10 ** (rec['other']['width'] / 20.0) - 1.0
-
-    side_music = wgain * 0.42 * (side_from(bed, 8.7) - side_from(bed, 13.1))
-    side_vocal = 0.10 * (side_from(stem['vocals'], 11.3) - side_from(stem['vocals'], 16.7))
-    side = (side_music + side_vocal).astype(np.float32)
-
-    k5(side, 'side')
-    k5(bed, 'bed')
-    mid = core + bed * 0.94
-    left = mid + side
-    right = mid - side
-    st = np.stack([left, right], axis=-1).astype(np.float32)
-    k5(st, 'premaster')
-    info['premaster_corr'] = round(float(np.corrcoef(st[:, 0], st[:, 1])[0, 1]), 4)
-    _side = (st[:, 0] - st[:, 1]) / 2
-    _mid = (st[:, 0] + st[:, 1]) / 2
-    info['premaster_side_minus_mid_db'] = round(rms_db(_side) - rms_db(_mid), 1)
-    info['mono_sum_vs_mid_db'] = round(rms_db(_mid) - rms_db(mid + 0.0), 3)
-
-    # ---------------------------------------------------------- MASTER BUS
-    # 1. gentle glue so the parts move together
-    m_st = st.mean(axis=1)
-    st, gr_glue = compress(st, SR, thresh_db=rms_db(m_st) - 7.0, ratio=2.0,
-                           attack_ms=35, release_ms=280, makeup_db=0.0, knee_db=10)
-    # put back the sub-40 Hz weight the lossy encode clipped away
-    k5(st, 'glue')
-    st = eq_curve(st, [20, 30, 40, 55, 80, 120, 200],
-                  [3.5, 2.6, 1.4, 0.4, 0.0, 0.0, 0.0])
-    k5(st, 'sub_eq')
-    # 2. parallel ('New York') compression: a heavily compressed copy lifts the
-    #    quiet detail between the hits - the density a modern master has, while
-    #    the transients of the dry signal survive untouched
-    par, _ = compress(st, SR, thresh_db=rms_db(m_st) - 22.0, ratio=3.5,
-                      attack_ms=6, release_ms=140, makeup_db=0.0, knee_db=8)
-    par = norm_db(par, rms_db(st) - 6.0)
-    k5(par, 'parallel_copy')
-    st = (st * 0.80 + par * 0.20).astype(np.float32)
-    k5(st, 'parallel_mix')
-    info['parallel_pct'] = 20.0
-    # tonal finish: match a modern reference balance (this is where the
-    # 'sounds like a clean record of today' part happens)
-    st, curve, before, after = dsp.match_target(
-        st, SR, strength=rec['tilt_gain'], fmin=30.0, fmax=6300.0,
+    # =========================================================== BUS: voicing
+    core, curve, before, after = dsp.match_target(
+        core, SR, strength=rec['tilt'], fmin=30.0, fmax=6300.0,
         max_boost=rec['max_boost'], max_cut=rec['max_cut'])
     info['tone_match'] = {'correction_db': {int(k): round(v, 2) for k, v in curve.items()},
                           'before_octave_db': {int(k): v for k, v in before.items()},
                           'after_octave_db': {int(k): v for k, v in after.items()}}
-    # the tonal lift inevitably raises tape/quantisation hiss -> clean it again
-    k5(st, 'tone_match')
-    st = denoise(st, SR, reduction_db=rec.get('dn_master', 6.0), floor_db=-24.0)
-    k5(st, 'denoise_master')
-    # Remove the boxiness the acetate transfer left around 250-500 Hz: the
-    # source carries +2..3 dB too much there relative to the rest.
-    st = eq_curve(st, [120, 200, 280, 380, 500, 700, 900],
-                  [0.0, -0.8, -1.8, -2.2, -1.6, -0.4, 0.0])
-    k5(st, 'debox')
-    # ---- top octave, part 2: neural reconstruction of the *mix*
-    # The stems already carry their reconstructed top end; what is still missing
-    # is whatever the separator assigned to nobody. A second network trained on
-    # the full mix fills exactly that, level-matched to the predicted envelope,
-    # and the noise-only remainder above 6.3 kHz is attenuated below it.
-    # Everything below 8 kHz carries real music (measured: the 6.3-8 kHz band
-    # has 23 dB SNR over silence and correlates 0.74 with the programme), so it
-    # must NOT be attenuated - only the noise-only remainder above 8 kHz is,
-    # and the neural model then fills that region back in.
-    st = dsp.spectral_noise_cut(st, SR, cut_hz=rec.get('air_cut_hz', 8000.0),
-                                amount_db=rec.get('air_noise_cut_db', -12.0))
-    st = neural_air_stereo(st, 'master', amount=rec.get('air_master', 1.0),
-                           hp_hz=rec.get('air_from_hz', 6800.0))
-    k5(st, 'spectral_repair')
+    stage(core, 'B3_voicing')
 
-    # ---------------------------------------------------------- LIMIT + NORMALISE
-    # Iterate: push to the loudness target, catch the peaks at the ceiling,
-    # repeat until both land. More iterations => peaks ride closer to the
-    # ceiling (denser master) without ever exceeding it.
+    # =========================================================== BUS: dynamics
+    # Parallel compression only: the dry signal keeps its transient and its
+    # breathing, the compressed copy underneath supplies the density. Measured
+    # programme spread is reported below and must not collapse.
+    m_core = core
+    par, gr = compress(core, SR, thresh_db=rms_db(m_core) - 22.0, ratio=2.5,
+                       attack_ms=10, release_ms=180, makeup_db=0.0, knee_db=10)
+    par = norm_db(par, rms_db(core) - 7.0)
+    pmix = float(rec.get('par', 0.16))
+    core = (core * (1 - pmix) + par * pmix).astype(np.float32)
+    info['parallel_pct'] = round(pmix * 100, 1)
+    stage(core, 'B4_parallel')
+
+    # =========================================================== BUS: glue
+    # A very gentle slow compressor for cohesion. Threshold far below the peaks so
+    # it only shapes phrases, not hits.
+    core, gr_glue = compress(core, SR, thresh_db=rms_db(m_core) - 14.0, ratio=1.35,
+                             attack_ms=45, release_ms=350, makeup_db=0.0, knee_db=14)
+    core = norm_db(core, rms_db(m_core))
+    stage(core, 'B5_glue')
+
+    # =========================================================== STEREO
+    # Sources are dual mono. The side component is built from the programme with
+    # an allpass decorrelator (flat magnitude -> no comb), level-solved to a
+    # requested correlation, and added as +/- so the mono sum is untouched.
+    target_corr = float(np.clip(rec.get('stereo_corr', 0.93), 0.85, 0.995))
+    side = image.build_side([core], SR, target_corr=target_corr, hp_hz=900.0)
+    st = np.stack([core + side, core - side], axis=-1).astype(np.float32)
+    info['stereo_target_corr'] = round(target_corr, 4)
+    info['premaster_corr'] = round(float(np.corrcoef(st[:, 0], st[:, 1])[0, 1]), 4)
+    _s, _m = (st[:, 0] - st[:, 1]) / 2, (st[:, 0] + st[:, 1]) / 2
+    info['premaster_side_minus_mid_db'] = round(rms_db(_s) - rms_db(_m), 1)
+    stage(st, 'B6_stereo')
+
+    # =========================================================== TOP OCTAVE
+    # The top octave is gone in the source (the 12.2-15.8 kHz band sits 35-45 dB
+    # below the mid reference). The trained network reconstructs it; the noise-only
+    # remainder above `air_cut_hz` is attenuated first so the network replaces hiss
+    # instead of stacking on top of it.
+    st = dsp.spectral_noise_cut(st, SR, cut_hz=8000.0,
+                                amount_db=rec.get('air_noise_cut_db', -12.0))
+    st = neural_air_stereo(st, 'master', amount=rec.get('air_master', 0.3),
+                           hp_hz=rec.get('air_from_hz', 5700.0))
+    stage(st, 'B7_air')
+
+    # =========================================================== LIMIT + NORMALISE
+    # The subsonic high-pass happens *before* the loudness loop: doing it after
+    # left song 2 at -1.76 dBTP while the others sat at -1.00, because the filter
+    # removes a little energy the limiter had already accounted for. Before the
+    # loop, the loop's final gain applies to the signal that is actually written.
+    _b, _a = sg.butter(6, 24.0 / (SR / 2), 'high')
+    st = sg.filtfilt(_b, _a, st, axis=0).astype(np.float32)
+    st -= st.mean(axis=0)
+
+    # Loudness and true peak have to be met *together*, and they fight: raising the
+    # level to reach -12 LUFS drives the peaks into the limiter, which adds density
+    # and therefore raises LUFS again, which then has to be pulled back down. That
+    # is a fixed point, not a single gain. The old loop only ever gained *up* to the
+    # loudness target, so a programme whose peaks sat 2.4 dB lower (song 2) was
+    # delivered at -2.38 dBTP instead of -1.00 - the numbers looked "safe" but the
+    # four masters were not uniform, which is the one thing this delivery promises.
+    # Order matters: gain to the loudness target, limit at the ceiling, then pull
+    # the (now slightly louder) result back to the target with a plain gain. That
+    # last step can only lower peaks, so it can never break the ceiling - whereas
+    # correcting *before* the limiter let the limiter add density and drift the
+    # loudness (song 1 landed at -12.40 LUFS that way).
     grs = []
-    for _ in range(5):
+    for _ in range(4):
         cur = loudness(st)
-        if cur < rec['target_lufs']:
+        if abs(cur - rec['target_lufs']) > 0.02:
             st = (st * (10 ** ((rec['target_lufs'] - cur) / 20.0))).astype(np.float32)
         st, gr = limiter(st, SR, ceiling_db=rec['ceiling'], lookahead_ms=5.0,
                          release_ms=170)
         grs.append(gr)
-    cur = loudness(st)
-    if cur > rec['target_lufs'] + 0.1:
-        st = (st * (10 ** ((rec['target_lufs'] - cur) / 20.0))).astype(np.float32)
+        cur = loudness(st)
+        if cur > rec['target_lufs']:
+            st = (st * (10 ** ((rec['target_lufs'] - cur) / 20.0))).astype(np.float32)
+        if abs(loudness(st) - rec['target_lufs']) < 0.02:
+            break
+
+    # last true-peak audit; a pure gain change above can only have lowered it
+    if true_peak_db(st) > rec['ceiling']:
+        st, _ = limiter(st, SR, ceiling_db=rec['ceiling'], lookahead_ms=4.0,
+                        release_ms=150)
+        cur = loudness(st)
+        if cur > rec['target_lufs']:
+            st = (st * (10 ** ((rec['target_lufs'] - cur) / 20.0))).astype(np.float32)
 
     info['master'] = {
         'lufs': round(loudness(st), 2),
@@ -498,29 +485,15 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
         'rms_db': round(rms_db(st), 2),
         'crest_db': round(peak_db(st) - rms_db(st), 2),
         'glue_gr_db': round(gr_glue, 2),
+        'parallel_gr_db': round(gr, 2),
         'limiter_gr_db': round(min(grs), 2),
         'bands': band_edges(st.mean(axis=1)),
         'stereo_corr': round(float(np.corrcoef(st[:, 0], st[:, 1])[0, 1]), 4),
+        'image': image.analyse(st, SR),
         'mono_sum_rms_db': round(rms_db(st.mean(axis=1)), 2),
     }
     info['stem_chain'] = proc
     info['elapsed_s'] = round(time.time() - t0, 1)
-
-    # ---------------------------------------------------------- SUB-REMOVAL + EXPORT
-    # The sub-restoration EQ and the compressors can leave inaudible subsonic
-    # energy below ~24 Hz. On a real system it only steals headroom and pumps
-    # woofers, so it goes out with a steep zero-phase high-pass (and this also
-    # centres the waveform at exactly 0).
-    from scipy import signal as _sg
-    _b, _a = _sg.butter(6, 24.0 / (SR / 2), 'high')
-    st = _sg.filtfilt(_b, _a, st, axis=0).astype(np.float32)
-    st -= st.mean(axis=0)
-    # one last, transparent true-peak safety check after the high-pass
-    if true_peak_db(st) > rec['ceiling']:
-        st, _ = limiter(st, SR, ceiling_db=rec['ceiling'], lookahead_ms=4.0, release_ms=150)
-    info['master']['lufs'] = round(loudness(st), 2)
-    info['master']['true_peak_dbtp'] = round(true_peak_db(st), 2)
-    info['master']['dc_offset'] = [round(float(v), 8) for v in st.mean(axis=0)]
 
     base = f'{out_dir}/{tag} (restored)'
     sf.write(base + '.wav', st, SR, subtype='PCM_24')

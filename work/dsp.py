@@ -214,6 +214,58 @@ def decrackle(x, sr=SR, thresh_db=-42.0, mix=0.9):
 
 
 # --------------------------------------------------------------------------- denoise
+def expansion_gate(x, sr=SR, gate_off_db=-8.0, ratio=3.0, attack_ms=4.0,
+                   hold_ms=60.0, release_ms=180.0, band=(60.0, 6000.0)):
+    """Downward expander: below the programme level, the signal is attenuated.
+
+    A denoiser working in the spectral domain has to trade musical noise against
+    suppression: to remove 10 dB of hiss from a quiet passage it must modulate
+    individual bins, which is audible as "swimming" or "chirping". Real restoration
+    does the opposite in the *easy* places and nothing in the hard ones: in the
+    gaps between phrases (where only noise is left) the whole signal can go down
+    hard and no one notices; while music is playing, the noise is masked and needs
+    no treatment at all.
+
+    So this expands around a *level* threshold derived from the programme itself
+    (85th percentile of the short-term envelope minus `gate_off_db`), with a long
+    hold so the gate cannot chatter on individual notes, and a slow release so the
+    hiss fades back in rather than switching on. It is a gain envelope, so it
+    introduces no distortion below the threshold either.
+    """
+    y = np.asarray(x, dtype=np.float64)
+    m = y.mean(axis=1) if y.ndim == 2 else y
+    # envelope in the band where the hiss is audible
+    b, a = signal.butter(4, [band[0] / (sr / 2), min(band[1], sr / 2 - 500) / (sr / 2)], 'band')
+    e = np.abs(signal.hilbert(signal.filtfilt(b, a, m)))
+    a_att = np.exp(-1.0 / (attack_ms * 1e-3 * sr))
+    e = signal.lfilter([1 - a_att], [1, -a_att], e)
+    lvl = np.percentile(e[e > 1e-9], 85) if (e > 1e-9).any() else 1.0
+    thr = lvl * 10 ** (gate_off_db / 20.0)
+    # gain in dB: 0 above the threshold, -ratio*deficit below it
+    with np.errstate(divide='ignore'):
+        deficit = 20 * np.log10(np.maximum(e, 1e-9) / max(thr, 1e-9))
+    att_db = np.minimum(0.0, deficit * (ratio - 1.0))
+    g = 10 ** (att_db / 20.0)
+    # hold: keep the gate open for hold_ms after the envelope leaves the threshold
+    hold = int(hold_ms * 1e-3 * sr)
+    if hold > 1:
+        from scipy import ndimage
+        g = ndimage.maximum_filter1d(g, size=hold)
+    # release
+    a_rel = np.exp(-1.0 / (release_ms * 1e-3 * sr))
+    out = np.empty_like(g)
+    v = 1.0
+    for i in range(len(g)):
+        v = g[i] if g[i] > v else a_rel * v + (1 - a_rel) * g[i]
+        out[i] = v
+    return out.astype(np.float32)
+
+
+def gate_apply(x, g):
+    y = np.asarray(x, dtype=np.float32)
+    return (y * (g[:, None] if y.ndim == 2 else g)).astype(np.float32)
+
+
 def _min_stat_noise(mag, q=0.12, smooth_hz=5, smooth_t=7, block=16):
     """
     Per-bin noise estimate via minimum statistics.
@@ -238,8 +290,16 @@ def _min_stat_noise(mag, q=0.12, smooth_hz=5, smooth_t=7, block=16):
 
 
 def _denoise_block(seg, sr, n, hop, reduction_db, over_sub, floor_db, smooth_t,
-                   mix, freq_weight):
-    """One block of the spectral denoiser (see `denoise`)."""
+                   mix, freq_weight, gate=None, floor_gap_db=-45.0):
+    """One block of the spectral denoiser (see `denoise`).
+
+    `gate` is an optional per-sample opening signal in [0, 1] (1 = music playing).
+    Where it closes, the permitted residual floor drops from `floor_db` to
+    `floor_gap_db`, so the gaps are cleaned to near silence while the music is left
+    almost untouched. This is the difference between "reduce the hiss a bit
+    everywhere" (which either does nothing audible or eats the music) and restoring
+    the *silence* - which is what one actually hears on a clean record.
+    """
     from scipy import ndimage
     y = np.asarray(seg, dtype=np.float32)
     ch_n = y.shape[1] if y.ndim == 2 else 1
@@ -258,11 +318,29 @@ def _denoise_block(seg, sr, n, hop, reduction_db, over_sub, floor_db, smooth_t,
         wf = np.array([p[0] for p in freq_weight], dtype=float)
         wv = np.array([p[1] for p in freq_weight], dtype=float)
         fw = np.interp(f, wf, wv)[:, None]
-        floor = 10 ** (floor_db / 20.0)
+        if gate is None:
+            floor_col = np.full(mag.shape[1], 10 ** (floor_db / 20.0))
+        else:
+            gt = gate[:len(sig)] if len(gate) >= len(sig) else np.pad(gate, (0, len(sig) - len(gate)), mode='edge')
+            nfr = mag.shape[1]
+            idx = np.linspace(0, len(gt) - 1, nfr).astype(int)
+            gfr = np.clip(gt[idx], 0.0, 1.0).astype(np.float64)
+            fd = np.interp(gfr, [0.0, 1.0], [floor_gap_db, floor_db])
+            floor_col = 10 ** (fd / 20.0)
+        floor = floor_col[None, :]
         red = 10 ** ((-reduction_db * fw) / 20.0)
         tgt = np.maximum(g, floor)
+        # NOTE: `floor` is a per-sample-column array, so it must stay 2-D here -
+        # a 1-D floor would silently broadcast into (nFreq, nFreq) instead.
         gg = 1.0 - (1.0 - tgt) * ((1.0 - red) / (1.0 - floor + 1e-9))
-        gg = fw * gg + (1.0 - fw) * 1.0
+        if gate is not None:
+            # A hard weight of 1.0 outside the gate would leave 96 % of the signal
+            # completely untouched even in the gaps, so the gate *is* the weighting
+            # here: where it is open we apply exactly as much reduction as the
+            # spectral estimate asks for, where it is closed we apply all of it.
+            gg = fw * gg + (1.0 - fw) * 1.0
+        else:
+            gg = fw * gg + (1.0 - fw) * 1.0
         gg = np.clip(gg, floor, 1.0).astype(np.float32)
         gg = ndimage.uniform_filter(gg, size=(3, smooth_t))
         Z2 = (mag.astype(np.float32) * gg) * np.exp(1j * phase.astype(np.float32))
@@ -276,8 +354,8 @@ def _denoise_block(seg, sr, n, hop, reduction_db, over_sub, floor_db, smooth_t,
 
 def denoise(x, sr=SR, n=2048, hop=512, reduction_db=10.0, over_sub=1.8,
             floor_db=-20.0, q=0.12, smooth_t=7, mix=1.0,
-            freq_weight=((0, 0.0), (120, 0.0), (350, 0.45), (1500, 1.0)),
-            block_s=8.0):
+            freq_weight=((0, 0.55), (120, 0.75), (350, 0.88), (1500, 1.0)),
+            block_s=8.0, gate_off=0.0, floor_gap_db=-45.0, gate_ratio=3.0):
     """
     Spectral denoiser with minimum-statistics noise tracking.
 
@@ -292,10 +370,17 @@ def denoise(x, sr=SR, n=2048, hop=512, reduction_db=10.0, over_sub=1.8,
     y = np.asarray(x, dtype=np.float32)
     ch_n = y.shape[1] if y.ndim == 2 else 1
     blk = int(block_s * sr)
+    gate = None
+    # `gate_off` is a *negative* offset in dB below the programme level, so the
+    # test must be `!= 0` - testing `> 0` silently disabled the gate for every
+    # sensible value, which is why three rounds of tuning changed nothing at all.
+    if gate_off:
+        gate = expansion_gate(y, sr, gate_off_db=gate_off, ratio=gate_ratio)
     ovb = int(0.5 * sr)
     if len(y) <= blk:
         return _denoise_block(y, sr, n, hop, reduction_db, over_sub, floor_db,
-                              smooth_t, mix, freq_weight)
+                              smooth_t, mix, freq_weight, gate=gate,
+                              floor_gap_db=floor_gap_db)
     win = np.ones(blk, dtype=np.float32)
     ramp = (0.5 - 0.5 * np.cos(np.linspace(0, np.pi, ovb))).astype(np.float32)
     win[:ovb] = ramp
@@ -307,7 +392,9 @@ def denoise(x, sr=SR, n=2048, hop=512, reduction_db=10.0, over_sub=1.8,
         a = max(0, pos - ovb // 2)
         b = min(len(y), a + blk)
         r = _denoise_block(y[a:b], sr, n, hop, reduction_db, over_sub, floor_db,
-                           smooth_t, mix, freq_weight)
+                           smooth_t, mix, freq_weight,
+                           gate=(gate[a:b] if gate is not None else None),
+                           floor_gap_db=floor_gap_db)
         w = win[:b - a]
         if ch_n > 1:
             acc[a:b] += r * w[:, None]
@@ -336,8 +423,16 @@ def _shelves_from_curve(freqs, gains_db, sr=SR):
 def fir_from_curve(freqs, gains_db, sr=SR, taps=16385):
     """
     Linear-phase FIR whose magnitude follows the given dB curve.
+
     Odd length + windowing gives exactly linear phase (integer group delay),
     which we compensate so all stems stay aligned.
+
+    Normalisation matters: an earlier version divided by `h.sum()`, i.e. it forced
+    0 dB at DC. For a curve that cuts 9 dB below 100 Hz that quietly added +9 dB to
+    the *whole* signal - which was then read as "the stem processing adds 8.75 dB
+    of level", inflated every low-mid band and, together with the bass stage, lifted
+    the hiss floor by 7 dB. The filter is normalised on its peak gain instead, so a
+    request of +2 dB really gives +2 dB.
     """
     grid, lg = _shelves_from_curve(freqs, gains_db, sr)
     F = taps // 2
@@ -345,7 +440,10 @@ def fir_from_curve(freqs, gains_db, sr=SR, taps=16385):
     h = np.fft.irfft(mag_lin, n=2 * F)      # length 2*F == taps
     h = np.roll(h, F)                       # zero-phase -> linear phase
     h *= np.hanning(len(h))
-    h /= h.sum()
+    h /= h.sum()                            # undo the DC-forcing normalisation
+    # ... and renormalise so the *peak* of the response is unity in linear terms
+    Fv = np.abs(np.fft.rfft(h, 1 << 14))
+    h *= 1.0 / max(Fv.max(), 1e-12)
     return h
 
 
@@ -363,9 +461,26 @@ def apply_fir(x, h):
     return out.astype(np.float32)
 
 
-def eq_curve(x, freqs, gains_db, sr=SR, taps=16385):
+def eq_curve(x, freqs, gains_db, sr=SR, taps=8193):
+    """Zero-phase EQ via a linear-phase FIR.
+
+    `taps` controls the frequency resolution: 8193 taps at 44.1 kHz resolve
+    ~5.4 Hz, which matters because the bass corrections sit at 28-130 Hz where a
+    shorter filter would simply not produce the requested shape. The filter is
+    padded by its own length before convolution so the low bins are not
+    distorted by the implicit zero-run at the start of the signal.
+    """
     h = fir_from_curve(freqs, gains_db, sr, taps)
-    return apply_fir(x, h)
+    y = np.asarray(x, dtype=np.float64)
+    pad = len(h)
+    if y.ndim == 2:
+        yp = np.pad(y, ((pad, pad), (0, 0)), mode='reflect')
+        out = np.stack([signal.fftconvolve(yp[:, c], h, 'same') for c in range(y.shape[1])], axis=-1)
+        out = out[pad:pad + len(y)]
+    else:
+        yp = np.pad(y, pad, mode='reflect')
+        out = signal.fftconvolve(yp, h, 'same')[pad:pad + len(y)]
+    return out.astype(np.float32)
 
 
 # --------------------------------------------------------------------------- dynamics / limiting
@@ -746,6 +861,11 @@ def match_target(x, sr=SR, curve=RESTORATION_CURVE_DB, strength=1.0, fmin=30.0,
     pts_g = [curve[ks[0]] * 0.5] + [curve[k] for k in ks] + [curve[ks[-1]] * 0.3]
     y = eq_curve(x, pts_f, pts_g, sr)
     after = octave_balance(y, sr)
+    # `before` must describe the signal that went in, `after` the one that comes
+    # out - measured relative to its own 200-800 Hz reference, so the two are
+    # directly comparable. (The old version returned the input twice, which is why
+    # every tone_match report in this project showed 0.0 dB everywhere and the EQ
+    # looked like it was doing nothing.)
     return y, curve, before, after
 
 

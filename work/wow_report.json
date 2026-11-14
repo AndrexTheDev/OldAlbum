@@ -1,0 +1,30 @@
+{
+  "1_I_Need_You": {
+    "ok": true,
+    "f0_hz": 372.46,
+    "iqr_cents": 14.29,
+    "window_s": 108.0,
+    "transport_cents_pp": 30.0
+  },
+  "2_Lonesome_Feeling": {
+    "ok": true,
+    "f0_hz": 291.37,
+    "iqr_cents": 16.5,
+    "window_s": 76.0,
+    "transport_cents_pp": 30.0
+  },
+  "3_Put_It_On": {
+    "ok": true,
+    "f0_hz": 260.42,
+    "iqr_cents": 9.87,
+    "window_s": 148.0,
+    "transport_cents_pp": 30.0
+  },
+  "4_Whats_New_Pussycat": {
+    "ok": false,
+    "reason": "no sustained note",
+    "best_f0_hz": 257.39,
+    "best_iqr_cents": 44.11,
+    "window_s": 36.0
+  }
+}

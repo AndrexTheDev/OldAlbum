@@ -1,0 +1,75 @@
+{
+ "3_Put_It_On": {
+  "tag": "3_Put_It_On",
+  "source": {
+   "wow": {
+    "ok": false,
+    "reason": "no sustained note (IQR 85 cents on 164.5 Hz)"
+   },
+   "reverb": {
+    "ok": true,
+    "median_decay_to_-25dB_ms": 218.2,
+    "p90_ms": 446.0,
+    "n": 155
+   },
+   "dyn": {
+    "crest_mean_db": 9.89,
+    "crest_std_db": 1.43,
+    "lra_db": 0.25
+   },
+   "stereo": {
+    "corr": 1.0,
+    "side_minus_mid_db": -59.62,
+    "hf_side_corr": 0.0,
+    "hf_env_corr": 0.001
+   },
+   "isp": {
+    "true_peak_dbtp": 0.1,
+    "sample_peak_db": 0.09,
+    "intersample_over_db": 0.01
+   },
+   "noise": {
+    "40-200": -39.3,
+    "200-1000": -39.9,
+    "1000-4000": -46.9,
+    "4000-8000": -50.3,
+    "8000-16000": -64.4
+   }
+  },
+  "restored": {
+   "wow": {
+    "ok": false,
+    "reason": "no sustained note (IQR 84 cents on 164.5 Hz)"
+   },
+   "reverb": {
+    "ok": true,
+    "median_decay_to_-25dB_ms": 274.3,
+    "p90_ms": 509.2,
+    "n": 179
+   },
+   "dyn": {
+    "crest_mean_db": 10.17,
+    "crest_std_db": 1.67,
+    "lra_db": 0.18
+   },
+   "stereo": {
+    "corr": 0.922,
+    "side_minus_mid_db": -13.92,
+    "hf_side_corr": -0.063,
+    "hf_env_corr": 0.493
+   },
+   "isp": {
+    "true_peak_dbtp": -1.0,
+    "sample_peak_db": -1.06,
+    "intersample_over_db": 0.06
+   },
+   "noise": {
+    "40-200": -40.9,
+    "200-1000": -43.2,
+    "1000-4000": -46.6,
+    "4000-8000": -49.3,
+    "8000-16000": -66.7
+   }
+  }
+ }
+}
