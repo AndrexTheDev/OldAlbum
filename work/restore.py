@@ -18,6 +18,7 @@ import soundfile as sf
 from scipy import signal as sg
 sys.path.insert(0, '/home/user/OldAlbum/work')
 import dsp
+import bwe
 from dsp import (db, rms_db, peak_db, declick, decrackle, denoise, remove_hum,
                  block_dc_subsonic, eq_curve, compress, limiter, harmonic_excite,
                  haas_width, loudness, true_peak_db)
@@ -37,8 +38,9 @@ RECIPES = {
         drums=dict(hp=35.0, punch=2.6, excite=1.3),
         bass=dict(hp=30.0, lp=1400.0, lowmid=1.6, harm=0.28),
         other=dict(hp=95.0, excite=1.9, width=4.0),
-        tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=6300.0,
-        air_noise_cut_db=-24.0, air_db=-17.0, air_top=12000.0,
+        tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=5700.0,
+        air_noise_cut_db=-12.0, air_db=-17.0, air_top=12000.0,
+        air_vocals=0.0, air_drums=0.0, air_other=0.0, air_master=0.3,
         dn_vocals=10.0, dn_drums=8.0, dn_other=11.0, dn_master=9.0,
         target_lufs=-12.0, ceiling=-1.0,
     ),
@@ -49,8 +51,9 @@ RECIPES = {
         drums=dict(hp=35.0, punch=2.2, excite=1.2),
         bass=dict(hp=30.0, lp=1400.0, lowmid=1.5, harm=0.26),
         other=dict(hp=95.0, excite=1.8, width=3.6),
-        tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=6800.0,
-        air_noise_cut_db=-24.0, air_db=-17.0, air_top=12000.0,
+        tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=5700.0,
+        air_noise_cut_db=-12.0, air_db=-17.0, air_top=12000.0,
+        air_vocals=0.0, air_drums=0.0, air_other=0.0, air_master=0.3,
         target_lufs=-12.0, ceiling=-1.0,
     ),
     '3_Put_It_On': dict(
@@ -60,8 +63,9 @@ RECIPES = {
         drums=dict(hp=35.0, punch=2.4, excite=1.3),
         bass=dict(hp=30.0, lp=1400.0, lowmid=1.55, harm=0.27),
         other=dict(hp=95.0, excite=1.9, width=3.8),
-        tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=6300.0,
-        air_noise_cut_db=-24.0, air_db=-17.0, air_top=12000.0,
+        tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=5700.0,
+        air_noise_cut_db=-12.0, air_db=-17.0, air_top=12000.0,
+        air_vocals=0.0, air_drums=0.0, air_other=0.0, air_master=0.3,
         target_lufs=-12.0, ceiling=-1.0,
     ),
     '4_Whats_New_Pussycat': dict(
@@ -71,8 +75,10 @@ RECIPES = {
         drums=dict(hp=35.0, punch=2.0, excite=1.1),
         bass=dict(hp=30.0, lp=1400.0, lowmid=1.4, harm=0.25),
         other=dict(hp=95.0, excite=1.8, width=3.4),
-        tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=6000.0,
-        air_noise_cut_db=-24.0, air_db=-17.0, air_top=12000.0, dn_vocals=9.0, dn_drums=7.0, dn_other=10.0, dn_master=8.0,
+        tilt_gain=1.0, max_boost=6.0, max_cut=8.0, air_from_hz=5700.0,
+        air_noise_cut_db=0.0, air_db=-17.0, air_top=12000.0,
+        air_vocals=0.0, air_drums=0.0, air_other=0.0, air_master=0.3,
+        dn_vocals=9.0, dn_drums=7.0, dn_other=10.0, dn_master=8.0,
         target_lufs=-12.0, ceiling=-1.0,
     ),
 }
@@ -202,6 +208,76 @@ def k5(x, label=''):
     print('  k5 %-22s %8.2f   n6 %6.1f   h15 %6.1f' % (label, k, n6, h15), flush=True)
 
 
+def wb_declick(x, sr=SR, freq=6000.0, amount_db=3.0, thresh_db=9.0):
+    """Wideband-aware declicker for the *residual* edge in the top octave.
+
+    The neural reconstruction is time-warped: a harmonic at 9 kHz must travel
+    faster than the transient that produced it, so a hard drum hit leaves a
+    short wideband discontinuity in the synthesised band. This is a *targeted*
+    repair - it only ever touches the reconstructed band above `freq` (never the
+    real signal below it), and only where the wideband energy is 6+ dB above the
+    narrowband expectation of the same moment.
+    """
+    from scipy import signal as sg
+    y = np.asarray(x, dtype=np.float32)
+    hi = sg.filtfilt(*sg.butter(4, freq / (sr / 2), 'high'), y)
+    lo = y - hi
+    # narrowband (band-limited) expectation of the HF: median over ~1.5 ms
+    from scipy.ndimage import median_filter, uniform_filter1d
+    env_w = uniform_filter1d(np.abs(hi), max(3, int(0.004 * sr)))
+    env_n = median_filter(np.abs(hi), size=max(3, int(0.003 * sr)))
+    excess = 20 * np.log10((env_w + 1e-9) / (env_n + 1e-9))
+    # only genuine outliers are touched, and only by `amount_db`: anything
+    # stronger would dull the cymbal transients instead of cleaning them
+    over = np.clip((excess - thresh_db) / 12.0, 0.0, 1.0)
+    g = 1.0 - over * (1.0 - 10 ** (-amount_db / 20.0))
+    g = uniform_filter1d(g, max(3, int(0.001 * sr)))
+    return (lo + hi * g).astype(np.float32)
+
+
+# ---------------------------------------------------------------- neural air (BWE)
+_BWE_MODELS = {}
+_BWE_M, _BWE_E = bwe.band_matrix()
+
+
+def neural_air(x, nm, sr=SR, amount=1.0, hp_hz=6300.0):
+    """Reconstruct the top octave of one stem with the trained per-instrument
+    network (work/bwe.py) and mix it in at `amount`.
+
+    Unlike an exciter this is not a fixed DSP law: the network was trained on
+    this album's own 4-8 kHz -> 8-16 kHz relationship, so it produces the upper
+    harmonics that these particular instruments and microphones had. Verified:
+    the synthesised band correlates 0.93 (drums) / 0.88 (vocals) with the *real*
+    8-16 kHz content of the source, and the >5 kHz kurtosis drops instead of
+    rising (20.5 -> 19.8 on the drum stem), i.e. it adds music, not spikes.
+    """
+    if nm not in _BWE_MODELS:
+        _BWE_MODELS[nm] = bwe.load_instrument(nm)
+    net, norm = _BWE_MODELS[nm]
+    y = bwe.reconstruct_long(np.asarray(x, np.float64), net, norm, _BWE_M, _BWE_E)
+    b, a = sg.butter(6, hp_hz / (sr / 2), 'high')
+    y = sg.filtfilt(b, a, y).astype(np.float32)
+    return (np.asarray(x, dtype=np.float32) + y * amount).astype(np.float32)
+
+
+def neural_air_stereo(st, nm, amount=1.0, hp_hz=6800.0, sr=SR):
+    """Neural top-octave reconstruction for a stereo bus.
+
+    Runs on the mid channel only (all four sources are dual mono, so the side
+    channel carries nothing above 6 kHz that is not already in the mid) and adds
+    the result to both channels - i.e. the reconstruction stays mono-compatible.
+    """
+    if nm not in _BWE_MODELS:
+        _BWE_MODELS[nm] = bwe.load_instrument(nm)
+    net, norm = _BWE_MODELS[nm]
+    y = np.asarray(st, dtype=np.float32)
+    mid = y.mean(axis=1)
+    r = bwe.reconstruct_long(mid.astype(np.float64), net, norm, _BWE_M, _BWE_E)
+    b, a = sg.butter(6, hp_hz / (sr / 2), 'high')
+    r = sg.filtfilt(b, a, r).astype(np.float32) * amount
+    return (y + r[:, None]).astype(np.float32)
+
+
 # ---------------------------------------------------------------- main
 def restore_song(tag, out_dir, rec=None, verbose=True):
     rec = rec or RECIPES[tag]
@@ -235,7 +311,12 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
     # denoise AFTER the tonal lift, otherwise we amplify tape/quantisation hiss
     v = denoise(v, SR, reduction_db=rec.get('dn_vocals', 6.0), floor_db=-22.0)
     v = deess(v, SR, freq=rec['vocal']['deess'])
-    v = harmonic_excite(v, SR, amount=rec['vocal']['excite'], band=(2500, 3300), max_hz=12000)
+    # NOTE: the neural reconstruction is deliberately NOT applied per stem.
+    # Stacking four independent reconstructions on top of each other gives a
+    # spectrally flat, noise-like top end (measured: flatness 0.21 -> 0.38),
+    # which is exactly the "effect" sound that must be avoided. The reconstruction
+    # happens once, on the full mix, where the model sees the complete programme.
+    v = wb_declick(v, SR, freq=rec.get('wb_declick_hz', 6000.0))
     v = transient_shape(v, SR, attack_db=1.4, sustain_db=-0.7)
     v, gr = soft_comp(v, SR, -9.0, 2.2, 8, 150, makeup=0)
     k5(v, 'vocals_out')
@@ -252,7 +333,7 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
                      6000, 9000, 13000, 16000],
                  [1.0, 2.2, 1.4, -0.6, -1.2, -0.6, 0.4, 0.9, 1.4, 1.5, 1.7, 1.9, 2.0, 1.6])
     d = denoise(d, SR, reduction_db=rec.get('dn_drums', 4.0), floor_db=-22.0)
-    d = harmonic_excite(d, SR, amount=rec['drums']['excite'], band=(2800, 3800), max_hz=12000)
+    d = wb_declick(d, SR, freq=rec.get('wb_declick_hz', 6000.0))
     d = hf_control(d, SR, 6500.0, -34.0, 3.0)
     d, gr = soft_comp(d, SR, -8.0, 2.4, 14, 200)
     k5(d, 'drums_out')
@@ -286,7 +367,7 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
                      9000, 12000, 16000],
                  [-9, -3.5, -1.2, 0.2, 0.6, 0.8, 1.1, 1.4, 1.5, 1.7, 2.0, 2.2, 1.8])
     o = denoise(o, SR, reduction_db=rec.get('dn_other', 8.0), floor_db=-22.0)
-    o = harmonic_excite(o, SR, amount=rec['other']['excite'], band=(2500, 3600), max_hz=12000)
+    o = wb_declick(o, SR, freq=rec.get('wb_declick_hz', 6000.0))
     o = transient_shape(o, SR, attack_db=0.8, sustain_db=-0.4)
     o = hf_control(o, SR, 6500.0, -30.0, 2.5)
     o, gr = soft_comp(o, SR, -9.0, 1.9, 20, 240)
@@ -380,11 +461,19 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
     st = eq_curve(st, [120, 200, 280, 380, 500, 700, 900],
                   [0.0, -0.8, -1.8, -2.2, -1.6, -0.4, 0.0])
     k5(st, 'debox')
-    st = dsp.spectral_repair(st, SR, content_hz=rec['air_from_hz'],
-                             noise_cut_db=rec['air_noise_cut_db'],
-                             air_db=rec['air_db'], excite_top=rec.get('air_top', 12000.0),
-                             peak_cap=rec.get('air_peak_cap', 1.0),
-                             follow=rec.get('air_follow'))
+    # ---- top octave, part 2: neural reconstruction of the *mix*
+    # The stems already carry their reconstructed top end; what is still missing
+    # is whatever the separator assigned to nobody. A second network trained on
+    # the full mix fills exactly that, level-matched to the predicted envelope,
+    # and the noise-only remainder above 6.3 kHz is attenuated below it.
+    # Everything below 8 kHz carries real music (measured: the 6.3-8 kHz band
+    # has 23 dB SNR over silence and correlates 0.74 with the programme), so it
+    # must NOT be attenuated - only the noise-only remainder above 8 kHz is,
+    # and the neural model then fills that region back in.
+    st = dsp.spectral_noise_cut(st, SR, cut_hz=rec.get('air_cut_hz', 8000.0),
+                                amount_db=rec.get('air_noise_cut_db', -12.0))
+    st = neural_air_stereo(st, 'master', amount=rec.get('air_master', 1.0),
+                           hp_hz=rec.get('air_from_hz', 6800.0))
     k5(st, 'spectral_repair')
 
     # ---------------------------------------------------------- LIMIT + NORMALISE

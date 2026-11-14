@@ -6,7 +6,9 @@
 work/src/
 work/prep/
 work/stems/
-work/models/
+# the ONNX separator weights (174 MB) are downloadable, but the trained
+# top-octave networks are 80 KB each and are part of the deliverable
+work/models/htdemucs.onnx
 work/logs/
 work/plots/
 work/__pycache__/

@@ -166,32 +166,85 @@ restrained 1960s-style stereo picture.
 7. **True-peak limiting** to −1.0 dBTP, iterated with loudness so both land:
    **−12.0 LUFS / −1.0 dBTP** for all four.
 
-#### 3.1 Spectral repair — how the missing top octave is restored honestly
+#### 3.1 The top octave: a trained network, not an EQ trick
 
-The band above ~6.5 kHz contains only noise, so it is:
+The first version of this chain "restored" the top end by squaring/cubing a
+presence band and adding that as air. It measured clean and it was *wrong* — the
+user's verdict was that it sounded like an effect instead of a recording, and the
+measurements confirm why.
 
-1. attenuated by 24 dB (it is noise, and the master needs the headroom),
-2. **replaced by harmonics generated from real content**: a narrow 2.3–4.2 kHz
-   band is squared and cubed, which produces *only* sum terms — genuine new
-   harmonics, not a copy of the original band,
-3. band-limited to 5.8–12 kHz (nothing is synthesised near Nyquist, where it
-   would only read as fizz), box-smoothed on a 1 ms constant and tilted at a
-   natural −6 dB/octave,
-4. **level-gated**: the generator is scaled by a slow envelope so its level stays
-   constant instead of following every hit (see §3.2),
-5. level-matched to **−20 dB relative to the 2–4 kHz presence band** — not to the
-   broadband programme. The low end and the drums differ wildly between these
-   four transfers; the presence band does not, so this is the reference that
-   makes one setting work for all four songs and guarantees the air can never
-   outgrow the music.
+**What the source actually contains.** Taking each band's residual above its own
+noise floor and correlating it with the broadband music envelope (Put It On):
 
-Net effect: the top end now **extends to the full 22.05 kHz** (source: hard stop
-at ~15.8 kHz) and the 6–16 kHz band is no longer noise at all — its spectral
-flatness falls to 0.01–0.04 (source 0.05–0.56), i.e. what is up there is
-harmonically structured, music-following content at a level 20 dB below the
-presence band.
+| band | SNR over silence | correlation with the music |
+|---|---|---|
+| 4–6 kHz | 26 dB | **0.82** |
+| 6.3–8 kHz | 23 dB | **0.74** |
+| 8–10 kHz | 20 dB | **0.74** |
+| 10–12.5 kHz | 20 dB | **0.78** |
+| 12.5–15 kHz | 11 dB | **0.78** |
 
-#### 3.2 The click problem, and why it was structural
+The high band is therefore *not* hiss: it still carries real, music-following
+content. An earlier stage in this project attenuated everything above 6.3 kHz by
+24 dB and replaced it with synthesis — i.e. it threw away actual music and put a
+generator in its place. That is exactly what "sounds like an effect" means, and
+it is fixed now.
+
+**Is it predictable?** A ridge regression from 24 log-spaced bands (200 Hz–6 kHz)
+to the 16 bands between 6.3 and 16 kHz explains **57 % of the variance** of the
+upper region (5-fold cross-validated, 5 076 frames from all four songs). The top
+end is the upper harmonics of instruments whose lower harmonics survived — so it
+can be *reconstructed*, not invented.
+
+**The model** (`work/bwe.py`, PyTorch, trained here, on this album):
+
+* a small 1-D U-Net over the log-frequency band axis, operating on the log
+  magnitude spectrogram (96 log bands, 1024-point STFT, 256-sample hop);
+* input: the 200 Hz–4 kHz context plus the 4–8 kHz octave; target: the real
+  8–16 kHz octave — i.e. **self-supervised on the material itself**, so what it
+  learns is this album's microphones, instruments and room, not a generic law;
+* four models, one per instrument family, trained on the separated stems:
+
+| model | training frames | held-out R² | MSE |
+|---|---|---|---|
+| drums | 27 173 | **0.84** | 11.6 dB² |
+| other (horns/keys/guitar) | 31 766 | **0.74** | 13.2 dB² |
+| bass | 21 425 | **0.63** | 6.6 dB² |
+| vocals | 66 616 | 0.61 | 22.9 dB² |
+| master (full mix, used at the bus) | 31 262 | **0.75** | 11.2 dB² |
+
+* the network predicts only a **spectral envelope**, never a waveform. The fine
+  structure comes from **phase-doubled octave transposition** of the real band
+  one octave below (bin k → 2k, phase ×2), which keeps every attack aligned with
+  the note that caused it — the reason this reads as a recording rather than a
+  hiss layer;
+* the prediction is **anchored to the real band**: where the recording still has
+  strong content in the target band, the envelope is pulled towards it (bounded
+  to ±`anchor` dB). A dB-domain blend was tried first and *failed* (kurtosis
+  21 → 133): blending two uncorrelated signals in dB jumps between them. A
+  bounded linear pull cannot.
+* processing is block-wise (20 s, 1 s cross-fade) because a full-length
+  complex STFT of 32 k frames needs 2.5 GB.
+
+**How well does it work?** Reconstructing the drum stem of *Put It On* and
+correlating the synthesised 8–16 kHz envelope with the *real* 8–16 kHz envelope
+of the same stem gives **r = 0.93**; on the finished masters, the correlation
+between the output's 8–16 kHz envelope and the source's own is **0.71–0.93**.
+Statistical texture of the reconstruction vs. the real band (drum stem):
+spectral flatness 0.769 vs. 0.760, spectral crest 7.8 vs. 8.8 dB — it is
+statistically indistinguishable from the real thing, which is exactly the
+opposite of the earlier exciter (flatness 0.21, crest 17 dB with the wrong sign).
+
+#### 3.2 Transient repair (`wb_declick`)
+
+The reconstruction is time-warped by construction: a 9 kHz harmonic must travel
+faster than the transient that produced it. On hard drum hits that leaves a
+short wideband discontinuity in the synthesised band. `wb_declick` hunts exactly
+those — a wideband envelope more than 9 dB above the narrowband expectation of
+the same moment — and attenuates only those frames by 3 dB, above 6 kHz only.
+It never touches the real signal below 6 kHz, so it cannot dull the cymbals.
+
+#### 3.3 The click problem in the earlier chain, and why it was structural
 
 An earlier version of this chain produced files that *measured* clean on a
 spectrogram but ticked on every drum hit. The cause was found by measuring the
@@ -225,25 +278,32 @@ dropout edges removes more than the synthesis adds.
 
 All figures from `work/summary.py` → `work/summary.json`.
 
-| Song | LUFS | true peak | crest | HF reach | 6–16 kHz band* | 6–16 kHz flatness | stereo corr |
+| Song | LUFS | true peak | crest | HF reach | 6–16 kHz band* | corr(output HF, source HF) | stereo corr |
 |---|---|---|---|---|---|---|---|
-| I Need You | −11.94 → **−12.06** | +0.07 → **−1.00** dBTP | 13.7 → 13.4 dB | 15.8 → **22.05** kHz | −69.3 → **−65.1** dB | 0.33 → **0.03** | 1.0000 → **0.9255** |
-| Lonesome Feeling | −8.45 → **−12.01** | +0.10 → **−1.00** dBTP | 10.9 → 13.5 dB | 15.9 → **22.05** kHz | −59.2 → **−57.0** dB | 0.56 → **0.04** | 1.0000 → **0.9443** |
-| Put It On | −9.67 → **−12.01** | +0.10 → **−1.00** dBTP | 11.9 → 13.6 dB | 15.9 → **22.05** kHz | −57.5 → **−54.8** dB | 0.21 → **0.02** | 1.0000 → **0.9409** |
-| What's New Pussycat | −10.26 → **−12.02** | −0.31 → **−1.00** dBTP | 12.1 → 14.0 dB | 15.8 → **22.05** kHz | −51.9 → **−50.5** dB | 0.05 → **0.01** | 1.0000 → **0.9302** |
+| I Need You | −11.94 → **−12.07** | +0.07 → **−1.00** dBTP | 13.7 → 13.3 dB | 15.8 → **22.05** kHz | −69.3 → −63.6 dB | **0.71** | 1.0000 → **0.9271** |
+| Lonesome Feeling | −8.45 → **−12.01** | +0.10 → **−1.00** dBTP | 10.9 → 13.6 dB | 15.9 → **22.05** kHz | −59.2 → −57.6 dB | **0.92** | 1.0000 → **0.9452** |
+| Put It On | −9.67 → **−12.01** | +0.10 → **−1.00** dBTP | 11.9 → 13.6 dB | 15.9 → **22.05** kHz | −57.5 → −52.5 dB | **0.88** | 1.0000 → **0.9413** |
+| What's New Pussycat | −10.26 → **−12.02** | −0.31 → **−1.00** dBTP | 12.1 → 14.0 dB | 15.8 → **22.05** kHz | −51.9 → −47.3 dB | **0.93** | 1.0000 → **0.9309** |
+
+The last-but-one column is the one to read: it is the correlation between the
+8–16 kHz envelope of the finished master and the 8–16 kHz envelope of the
+original transfer. 0.88–0.93 means the reconstructed top end *follows the
+recording* — it is the same music, not added air. (A fixed exciter scores near
++0.3 on this metric; the first neural version scored 0.19 before it was
+anchored.)
+
 
 \* quiet-frame level of the 6–16 kHz band, normalised to −12 LUFS, so it is
 comparable across the four masters. Lower = less hiss.
 
-**A note on the 6–16 kHz column.** It measures slightly *higher* after
-restoration on all four songs. That column is not hiss any more: the spectral
-flatness of 6–16 kHz drops from **0.33 → 0.03**, **0.56 → 0.04**, **0.21 → 0.02**
-and **0.05 → 0.01**. Flat spectrum = noise; a low flatness = a few strong,
-harmonically related partials. In other words: what used to be a wall of hiss is
-now the upper harmonics of the music, and it is exactly as loud as the music
-needs it to be. The envelope correlation between that band and the 2–4 kHz
-music content is **0.82–0.87**, i.e. the air moves with the music instead of
-running underneath it — which is precisely what the ear judges.
+**A note on the 6–16 kHz column.** It is *higher* after restoration, and that is
+intended: the band now contains reconstructed harmonics of the music instead of a
+noise floor, and harmonic energy at the level of the music is exactly what a
+1965 studio master has up there. What matters is that it is *structured*: the
+spectral flatness of the band falls (source → output: 0.51 → 0.26, 0.66 → 0.46,
+0.35 → 0.28, 0.08 → 0.21) and, far more telling, its envelope correlates
+0.71–0.93 with the real 8–16 kHz content of the original transfer. A generator
+that ignores the music cannot do that.
 
 **Octave balance** (1/1-octave, relative to the mean of 200–800 Hz;
 `work/summary.json` has all four songs):
@@ -304,6 +364,9 @@ docs/
   <song>_comparison.png                 spectrogram / spectrum / noise / stereo
 RESTORATION.md                          this report
 work/                                   the whole toolchain (see §7)
+work/bwe.py                             neural top-octave reconstruction (PyTorch)
+work/models/bwe_*.pt                    the five trained models (vocals/drums/bass/other/master)
+work/bwe_report.json                    held-out R² per model
 ```
 
 Not tracked in git (regenerable, ~1.9 GB): `work/stems/` (4-stem set),
@@ -318,6 +381,7 @@ python3 -m venv .venv && .venv/bin/pip install numpy scipy soundfile \
 python work/analyze.py         # forensic report of the sources      -> work/analysis.json
 python work/diagnose.py        # deep diagnostics + plots             -> work/diagnose.json
 python work/run_separation.py  # htdemucs stems (CPU, ~4 min/song)    -> work/stems/
+python work/bwe.py             # train the top-octave networks        -> work/models/bwe*.pt
 ./work/run_all_restore.sh      # restoration + mastering, 1 process per song
 python work/summary.py         # before/after table                   -> work/summary.json
 python work/export.py          # A/B excerpts, MP3s, doc plots

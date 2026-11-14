@@ -1,0 +1,32 @@
+{
+ "vocals": {
+  "frames": 66616,
+  "r2": 0.614,
+  "mse_db2": 22.92,
+  "time_s": 646.7
+ },
+ "drums": {
+  "frames": 27173,
+  "r2": 0.838,
+  "mse_db2": 11.59,
+  "time_s": 247.3
+ },
+ "bass": {
+  "frames": 21425,
+  "r2": 0.63,
+  "mse_db2": 6.56,
+  "time_s": 194.9
+ },
+ "other": {
+  "frames": 31766,
+  "r2": 0.739,
+  "mse_db2": 13.23,
+  "time_s": 301.2
+ },
+ "master": {
+  "frames": 31262,
+  "r2": 0.75,
+  "mse_db2": 11.2,
+  "note": "trained on the full mix, used at the master bus"
+ }
+}

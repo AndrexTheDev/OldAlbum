@@ -237,54 +237,90 @@ def _min_stat_noise(mag, q=0.12, smooth_hz=5, smooth_t=7, block=16):
     return np.maximum(est, 1e-12)
 
 
+def _denoise_block(seg, sr, n, hop, reduction_db, over_sub, floor_db, smooth_t,
+                   mix, freq_weight):
+    """One block of the spectral denoiser (see `denoise`)."""
+    from scipy import ndimage
+    y = np.asarray(seg, dtype=np.float32)
+    ch_n = y.shape[1] if y.ndim == 2 else 1
+    out = []
+    for c in range(ch_n):
+        sig = y[:, c] if y.ndim == 2 else y
+        f, t, Z = signal.stft(sig.astype(np.float64), sr, nperseg=n,
+                              noverlap=n - hop, window='hann')
+        mag = np.abs(Z)
+        phase = np.angle(Z)
+        noise = _min_stat_noise(mag, q=0.12, smooth_t=smooth_t)
+        sig_pow = mag ** 2
+        noise_pow = (noise * over_sub) ** 2
+        g = np.sqrt(np.maximum(np.maximum(sig_pow - noise_pow, 0.0) /
+                               (sig_pow + 1e-18), 0.0))
+        wf = np.array([p[0] for p in freq_weight], dtype=float)
+        wv = np.array([p[1] for p in freq_weight], dtype=float)
+        fw = np.interp(f, wf, wv)[:, None]
+        floor = 10 ** (floor_db / 20.0)
+        red = 10 ** ((-reduction_db * fw) / 20.0)
+        tgt = np.maximum(g, floor)
+        gg = 1.0 - (1.0 - tgt) * ((1.0 - red) / (1.0 - floor + 1e-9))
+        gg = fw * gg + (1.0 - fw) * 1.0
+        gg = np.clip(gg, floor, 1.0).astype(np.float32)
+        gg = ndimage.uniform_filter(gg, size=(3, smooth_t))
+        Z2 = (mag.astype(np.float32) * gg) * np.exp(1j * phase.astype(np.float32))
+        _, r = signal.istft(Z2, sr, nperseg=n, noverlap=n - hop, window='hann',
+                            boundary=True)
+        r = r[:len(sig)].astype(np.float32)
+        out.append(mix * r + (1 - mix) * sig.astype(np.float32) if mix < 1.0 else r)
+    res = np.stack(out, axis=-1) if ch_n > 1 else out[0]
+    return res.astype(np.float32)
+
+
 def denoise(x, sr=SR, n=2048, hop=512, reduction_db=10.0, over_sub=1.8,
             floor_db=-20.0, q=0.12, smooth_t=7, mix=1.0,
-            freq_weight=((0, 0.0), (120, 0.0), (350, 0.45), (1500, 1.0))):
+            freq_weight=((0, 0.0), (120, 0.0), (350, 0.45), (1500, 1.0)),
+            block_s=8.0):
     """
     Spectral denoiser with minimum-statistics noise tracking.
 
     * noise floor per bin from the low percentile over time
     * power-domain over-subtraction with a soft floor (no musical noise)
     * gain smoothed across time+frequency, then mixed in by `mix`
+
+    Runs in overlapping blocks (8 s, 0.5 s cross-fade): the statistics are
+    accumulated per block, and the memory footprint stays around 300 MB instead
+    of the ~2 GB a full-length float64 STFT needs for a three-minute master.
     """
-    from scipy import ndimage
-    y = np.asarray(x, dtype=np.float64)
+    y = np.asarray(x, dtype=np.float32)
     ch_n = y.shape[1] if y.ndim == 2 else 1
-    out = []
-    for c in range(ch_n):
-        sig = y[:, c] if y.ndim == 2 else y
-        f, t, Z = signal.stft(sig, sr, nperseg=n, noverlap=n - hop, window='hann')
-        mag = np.abs(Z)
-        phase = np.angle(Z)
-
-        noise = _min_stat_noise(mag, q=q, smooth_t=smooth_t)
-        sig_pow = mag ** 2
-        noise_pow = (noise * over_sub) ** 2
-        g = np.maximum(sig_pow - noise_pow, 0.0) / (sig_pow + 1e-18)
-        g = np.sqrt(np.maximum(g, 0.0))
-
-        # requested amount of reduction, expressed as a gain floor.
-        # Frequency-dependent: sustained musical content (bass lines, drones)
-        # must never be mistaken for hiss, so below ~350 Hz the processor is
-        # progressively disabled - tape/AAC hiss lives in the top end anyway.
-        wf = np.array([p[0] for p in freq_weight], dtype=float)
-        wv = np.array([p[1] for p in freq_weight], dtype=float)
-        fw = np.interp(f, wf, wv)[:, None]
-        floor = 10 ** (floor_db / 20.0)
-        red_f = 10 ** ((-reduction_db * fw) / 20.0)
-        red = red_f
-        tgt = np.maximum(g, floor)
-        gg = 1.0 - (1.0 - tgt) * ((1.0 - red) / (1.0 - floor + 1e-9))
-        # blend back to unity where the weight is low
-        gg = fw * gg + (1.0 - fw) * 1.0
-        gg = np.clip(gg, floor, 1.0)
-        gg = ndimage.uniform_filter(gg, size=(3, smooth_t))
-        Z2 = (mag * gg) * np.exp(1j * phase)
-        _, r = signal.istft(Z2, sr, nperseg=n, noverlap=n - hop, window='hann', boundary=True)
-        r = r[:len(sig)]
-        out.append(mix * r + (1 - mix) * sig if mix < 1.0 else r)
-    res = np.stack(out, axis=-1)
-    return (res if res.shape[1] > 1 else res[:, 0]).astype(np.float32)
+    blk = int(block_s * sr)
+    ovb = int(0.5 * sr)
+    if len(y) <= blk:
+        return _denoise_block(y, sr, n, hop, reduction_db, over_sub, floor_db,
+                              smooth_t, mix, freq_weight)
+    win = np.ones(blk, dtype=np.float32)
+    ramp = (0.5 - 0.5 * np.cos(np.linspace(0, np.pi, ovb))).astype(np.float32)
+    win[:ovb] = ramp
+    win[-ovb:] = ramp[::-1]
+    acc = np.zeros_like(y, dtype=np.float32)
+    wsum = np.zeros(len(y), dtype=np.float32)
+    pos = 0
+    while pos < len(y):
+        a = max(0, pos - ovb // 2)
+        b = min(len(y), a + blk)
+        r = _denoise_block(y[a:b], sr, n, hop, reduction_db, over_sub, floor_db,
+                           smooth_t, mix, freq_weight)
+        w = win[:b - a]
+        if ch_n > 1:
+            acc[a:b] += r * w[:, None]
+        else:
+            acc[a:b] += r * w
+        wsum[a:b] += w
+        pos += blk - ovb
+    wsum[wsum < 1e-6] = 1.0
+    if ch_n > 1:
+        acc /= wsum[:, None]
+    else:
+        acc /= wsum
+    return acc.astype(np.float32)
 
 
 # --------------------------------------------------------------------------- EQ
@@ -556,6 +592,56 @@ def tilt_filter(x, sr=SR, tilt_db_per_oct=-6.0, ref_hz=7600.0, fmin=4000.0):
         octs = np.log2(max(f_, 1.0) / ref_hz)
         gains.append(float(np.clip(tilt_db_per_oct * octs, -30, 6)))
     return eq_curve(x, freqs, gains, sr, taps=4097)
+
+
+def spectral_noise_cut(x, sr=SR, cut_hz=6800.0, amount_db=-24.0, smooth_oct=0.25):
+    """Attenuate the band above `cut_hz` where it is *only* noise.
+
+    Unlike a plain high-shelf this multiplies the spectrum band by a smooth
+    gain, leaving everything below `cut_hz` untouched, and it is the stage the
+    neural reconstruction is added on top of - so the reconstruction replaces
+    the noise instead of sitting on it.
+    """
+    from scipy import signal as sg
+    y = np.asarray(x, dtype=np.float32)
+    ch = y.shape[1] if y.ndim == 2 else 1
+    g = 10 ** (amount_db / 20.0)
+    lo, hi = cut_hz, cut_hz * 2 ** smooth_oct
+    npar, nov = 2048, 1536
+    blk, ov = int(8.0 * sr), int(0.5 * sr)
+    out = np.zeros_like(y)
+    wsum = np.zeros(len(y), dtype=np.float32)
+    win = np.ones(blk, dtype=np.float32)
+    ramp = (0.5 - 0.5 * np.cos(np.linspace(0, np.pi, ov))).astype(np.float32)
+    win[:ov] = ramp
+    win[-ov:] = ramp[::-1]
+    pos = 0
+    while pos < len(y):
+        a = max(0, pos - ov // 2)
+        b = min(len(y), a + blk)
+        seg = y[a:b]
+        z = np.empty_like(seg) if ch > 1 else np.empty(len(seg), dtype=np.float32)
+        for c in range(ch):
+            s_ = seg[:, c] if ch > 1 else seg
+            f_, t_, Z = sg.stft(s_.astype(np.float64), sr, nperseg=npar,
+                                noverlap=nov, window='hann')
+            w = np.clip((f_ - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
+            gm = (1.0 + (g - 1.0) * w)[:, None]
+            _, r = sg.istft(Z * gm, sr, nperseg=npar, noverlap=nov, window='hann')
+            r = r[:len(s_)].astype(np.float32)
+            if ch > 1:
+                z[:, c] = r
+            else:
+                z = r
+        w = win[:b - a]
+        if ch > 1:
+            out[a:b] += z * w[:, None]
+        else:
+            out[a:b] += z * w
+        wsum[a:b] += w
+        pos += blk - ov
+    wsum[wsum < 1e-6] = 1.0
+    return (out / (wsum[:, None] if ch > 1 else wsum)).astype(np.float32)
 
 
 # --------------------------------------------------------------------------- stereo
