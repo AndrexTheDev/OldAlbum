@@ -90,6 +90,29 @@ loudness or the peak target; leaving it is the correct choice.
 
 FLAC masters verified **bit-identical** to the rendered WAVs (24-bit PCM, 44.1 kHz).
 
+### The 320 kb/s MP3s were violating the peak spec
+
+Found on the last pass, by decoding the delivered files instead of trusting the
+encoder. The masters sit at −1.00 dBTP; the 320 kb/s MP3s decoded to
+**−0.95 / −1.17 / −0.97 / −0.98 dBTP** — three of four *over* the ceiling, because
+the transform coder adds pre-echo and inter-sample overshoot that was not in the
+WAV. The portable copies did not meet the spec the lossless ones met.
+
+First attempted fix, a static −0.4 dB trim, was **wrong**: it brought the peaks to
+−1.33 dBTP but dropped the MP3s to −12.41 LUFS, breaking the album's loudness
+consistency. Measured, the codec only overshoots by **+0.07 dB**, so the encoder
+input is now limited at `ceiling − 0.07 dBTP`. The limiter touches only the top
+0.07 dB of the loudest peaks; the decoded files now measure:
+
+| MP3 | LUFS | true peak | spec |
+|---|---|---|---|
+| I Need You | −12.01 | −1.03 | OK |
+| Lonesome Feeling | −12.00 | −1.17 | OK |
+| Put It On | −12.02 | −1.02 | OK |
+| What's New Pussycat | −12.01 | −1.03 | OK |
+
+Verified by decoding each file, not by assuming the conversion was transparent.
+
 ---
 
 ## 4. What the re-verification changed in the output
