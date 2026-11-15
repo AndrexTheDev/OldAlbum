@@ -239,7 +239,8 @@ def train_bwe(songs, val_song, epochs=60, win=64, batch=32, lr=2e-3, adv_w=0.05,
 
 # --------------------------------------------------------------------------- inference
 @torch.no_grad()
-def extend(song, model, stats, strength_db=18.0, blend=1.0, max_gain_db=40.0):
+def extend(song, model, stats, strength_db=18.0, blend=1.0, max_gain_db=40.0,
+           noise_gate_db=6.0, snr_soft_db=9.0, min_gate=0.0):
     """Add the reconstructed 8-16 kHz band to a band-limited song.
 
     `strength_db` is how much the band is raised relative to where it currently
@@ -273,6 +274,38 @@ def extend(song, model, stats, strength_db=18.0, blend=1.0, max_gain_db=40.0):
     # curve is continuous in frequency there is no seam to hear. This is also what
     # `strength_db` now means: the *ratio* is lifted, not the absolute level, so
     # the result follows the music instead of imposing a fixed band level.
+    # ---- signal-to-noise gate -------------------------------------------
+    #
+    # Measured on all four sources, spectral flatness of the upper band:
+    #
+    #    band        2-3k  3-4k  4-5k  5-6k  6-7k  7-8k  8-14k  14-16k
+    #    flatness    -4.8  -4.4  -3.9  -3.5  -2.8  -2.5  -2.6    -8.0  dB
+    #
+    # 0 dB is white noise. Everything above about 7 kHz is mostly noise, and the
+    # 8-14 kHz region is where a hiss wall lives: temporally constant, no attacks,
+    # no tonal structure. Flatness alone does not prove it, so the decisive test
+    # was the dynamic range of the band - at 4-5 kHz the 5th and 95th percentile
+    # frame energies sit 37 dB apart, at 8-9 kHz they sit 21 dB apart and the
+    # distribution has no quiet frames at all.
+    #
+    # Applying a flat +26 dB to that region is what made the delivery hiss. The
+    # network's output itself is fine; the mistake was amplifying everything,
+    # including the noise the band is mostly made of.
+    #
+    # So: estimate the noise floor per bin (a low percentile over time), and let
+    # the gain fall to zero below it. `snr_soft_db` is the width of the soft knee,
+    # so the gate fades instead of switching - a hard gate on a broadband signal
+    # is audible as "breathing" or "waterfalls".
+    if noise_gate_db is not None:
+        floor_bin = np.percentile(mag, 20.0, axis=1, keepdims=True)   # (bins,1)
+        snr_db_bin = 20 * np.log10((mag + 1e-20) / (floor_bin + 1e-20))
+        # gate: 0 at the floor, 1 at floor + snr_soft_db, smooth in between
+        gate = np.clip(snr_db_bin / max(snr_soft_db, 1e-6), 0.0, 1.0)
+        gate = gate ** 2                       # gentle onset, keeps transients
+        gate = np.maximum(gate, min_gate)
+    else:
+        gate = None
+
     cur_mel = 10 ** logmel(mag, _FB_OUT)                   # (n_out, T), power
     want_mel = 10 ** (pred.T + strength_db / 10.0)         # (n_out, T)
     ratio_db = 10 * np.log10((want_mel + 1e-20) / (cur_mel + 1e-20))
@@ -319,6 +352,12 @@ def extend(song, model, stats, strength_db=18.0, blend=1.0, max_gain_db=40.0):
     wf = np.clip(np.log2(np.maximum(f, 1e-9) / xf_lo) / np.log2(CUT_HZ / xf_lo), 0.0, 1.0)
     g_db *= (wf ** 3)[:, None]
     g_db[f >= TOP_HZ] = 0.0
+    if gate is not None:
+        # scale the gain by how far each time-frequency cell sits above the noise.
+        # Applied per bin (not per mel band) so the fine structure that IS there -
+        # cymbal shimmer, sibilance - keeps its full lift while the steady floor
+        # between them does not.
+        g_db = g_db * gate
     newmag = mag * (10 ** (g_db / 20.0))
 
     y = istft_from_mag_phase(newmag, np.angle(

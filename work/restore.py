@@ -337,7 +337,7 @@ def _band_level_db(x, lo, hi, sr=SR):
 
 
 def air_bwe2(st, sr=SR, strength_db=None, target_db=_TARGET_8_12_DB,
-             lo=12.0, hi=16.0):
+             lo=12.0, hi=16.0, snr_soft_db=21.0, noise_gate_db=6.0):
     """Reconstruct the top two octaves with the recurrent adversarial network.
 
     Replaces the per-instrument band-matrix model (`bwe.neural_air_stereo`), which
@@ -387,7 +387,8 @@ def air_bwe2(st, sr=SR, strength_db=None, target_db=_TARGET_8_12_DB,
     hist = []
     for _ in range(6):
         r = bwe2.extend(mid.astype(np.float32), _BWE2['net'], _BWE2['stats'],
-                        strength_db=strength_db)
+                        strength_db=strength_db, noise_gate_db=noise_gate_db,
+                        snr_soft_db=snr_soft_db)
         add = (np.asarray(r, dtype=np.float32) - mid.astype(np.float32))
         got = _band_level_db((mid + add), int(lo * 1000), int(hi * 1000), sr)
         hist.append(round(got, 1) if got is not None else None)
