@@ -850,7 +850,17 @@ def loudness(x, sr=SR):
     return float(meter.integrated_loudness(np.asarray(x, dtype=np.float64)))
 
 
-def true_peak_db(x, oversample=4):
+def true_peak_db(x, oversample=8):
+    """Inter-sample true peak in dBTP.
+
+    Measured on song 1 of this album: at 4x oversampling the master read -1.000
+    dBTP while at 8x it read -0.923 dBTP - 77 mdB of inter-sample overshoot that
+    4x could not see, on a master whose sample peak was already at -1.006 dBFS.
+    EBU R128 requires at least 4x; that is a *minimum* for typical programme, and
+    this material has a dense top end after bandwidth extension, which is exactly
+    where the fine inter-sample structure lives. 8x costs one extra resample and
+    removes the whole class of error.
+    """
     y = np.asarray(x, dtype=np.float64)
     up = signal.resample_poly(y, oversample, 1, axis=0)
     return float(20 * np.log10(max(float(np.max(np.abs(up))), 1e-20)))

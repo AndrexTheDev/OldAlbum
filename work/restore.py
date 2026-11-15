@@ -570,7 +570,11 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
         cur = loudness(st)
         if abs(cur - rec['target_lufs']) > 0.02:
             st = (st * (10 ** ((rec['target_lufs'] - cur) / 20.0))).astype(np.float32)
-        st, gr = limiter(st, SR, ceiling_db=rec['ceiling'], lookahead_ms=5.0,
+        # 0.08 dB of margin below the ceiling: the limiter works on the sample
+        # peak, and 8x oversampling later reveals a little inter-sample overshoot
+        # above it. Without the margin song 1 shipped at -0.90 dBTP against a
+        # -1.00 spec even though its sample peak was at -1.006 dBFS.
+        st, gr = limiter(st, SR, ceiling_db=rec['ceiling'] - 0.08, lookahead_ms=5.0,
                          release_ms=170)
         grs.append(gr)
         cur = loudness(st)
@@ -598,7 +602,7 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
         if abs(gain) > 1e-4:
             st = (st * (10 ** (gain / 20.0))).astype(np.float32)
         if true_peak_db(st) > rec['ceiling'] + 1e-3:
-            st, _ = limiter(st, SR, ceiling_db=rec['ceiling'], lookahead_ms=4.0,
+            st, _ = limiter(st, SR, ceiling_db=rec['ceiling'] - 0.08, lookahead_ms=4.0,
                             release_ms=150)
         # a limit can push loudness up: only ever pull down from here
         over = loudness(st) - rec['target_lufs']
