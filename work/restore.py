@@ -385,7 +385,7 @@ def air_bwe2(st, sr=SR, strength_db=None, target_db=_TARGET_8_12_DB,
     # is under 0.5 dB.
     add = None
     hist = []
-    for _ in range(4):
+    for _ in range(6):
         r = bwe2.extend(mid.astype(np.float32), _BWE2['net'], _BWE2['stats'],
                         strength_db=strength_db)
         add = (np.asarray(r, dtype=np.float32) - mid.astype(np.float32))
@@ -396,7 +396,7 @@ def air_bwe2(st, sr=SR, strength_db=None, target_db=_TARGET_8_12_DB,
         resid = target_db - got
         if abs(resid) < 0.5:
             break
-        strength_db = float(np.clip(strength_db + resid, 4.0, 30.0))
+        strength_db = float(np.clip(strength_db + resid, 4.0, 38.0))
     return (y + add[:, None]).astype(np.float32), {
         'strength_db': round(strength_db, 2),
         'before_db': None if cur is None else round(cur, 1),
@@ -538,8 +538,35 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
     # below the mid reference). The trained network reconstructs it; the noise-only
     # remainder above `air_cut_hz` is attenuated first so the network replaces hiss
     # instead of stacking on top of it.
-    st = dsp.spectral_noise_cut(st, SR, cut_hz=8000.0,
-                                amount_db=rec.get('air_noise_cut_db', -12.0))
+    # The denoise cut and the reconstruction have to OVERLAP, not abut.
+    #
+    # Measured on the first render of this stage: the noise cut ramped from 8.0 to
+    # 9.5 kHz while the network started adding at exactly 8.0 kHz, so 6.6-7.5 kHz
+    # came out 2.4-2.9 dB low and 8 kHz jumped +24.5 dB in a single bin. In the
+    # spectrogram that is a black bar at 7.2-8 kHz followed by a hard edge - the
+    # "hole then ledge" the listener would hear as a lisp with a shelf on it.
+    #
+    # Now the cut starts a full octave lower (4 kHz) and ramps gently to 9.5 kHz,
+    # so the top of the cymbal and the sibilance of the vocal are being faded out
+    # while the network is fading in over the same region.
+    # The noise cut must NOT eat the region the network is about to fill. It ran
+    # at -12 dB from 8 kHz upwards, and the reconstruction target is -26 dB
+    # relative - so the cut was removing about half of what the band needed and
+    # the closed loop compensated by asking for more gain everywhere, which put a
+    # -6 dB notch at 6.6-7 kHz next to a +24 dB shelf at 8 kHz.
+    #
+    # The cut is there for one reason: the source's 8-16 kHz region is 17-26 dB
+    # below where it belongs and consists mostly of codec noise. The network
+    # replaces that content anyway. -5 dB is enough to take the noise down without
+    # fighting the reconstruction, and the reconstruction sets the resulting level.
+    # The cut is applied ONLY above the reconstruction band. Any cut inside
+    # 6.8-16 kHz is a notch that the reconstruction then has to climb out of, and
+    # the spectrogram showed exactly that: a dark bar at 7-8 kHz in every render,
+    # no matter where the crossover was placed or how wide the ramp was made.
+    # The band's own level is set by the continuous gain curve in bwe2 alone, so
+    # there is nothing to carve out first.
+    st = dsp.spectral_noise_cut(st, SR, cut_hz=16000.0, smooth_oct=0.5,
+                                amount_db=rec.get('air_noise_cut_db', -6.0))
     st, air_info = air_bwe2(st, SR, target_db=rec.get('air_target_db', -26.0))
     info['air'] = air_info
     stage(st, 'B7_air')

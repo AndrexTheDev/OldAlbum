@@ -41,8 +41,14 @@ import soundfile as sf
 from scipy import signal as sg
 
 SR = 44100
-N_FFT = 1024
-HOP = 256
+# 2048-sample window (46 ms), not 1024 (23 ms). At 1024 the bin spacing is 43 Hz
+# but the effective resolution near 12 kHz is poor enough that the measured level
+# of the 8-16 kHz band came out at -78 dB against a true level of about -40 dB, so
+# the network was being fed almost nothing above 8 kHz. 2048 halves the time
+# resolution of the *envelope*, which a bandwidth model does not need, and doubles
+# the frequency resolution where it does.
+N_FFT = 2048
+HOP = 512
 N_MELS_IN = 48
 N_MELS_OUT = 24
 CUT_HZ = 8000.0        # input band limit (what the source reliably has)
@@ -233,7 +239,7 @@ def train_bwe(songs, val_song, epochs=60, win=64, batch=32, lr=2e-3, adv_w=0.05,
 
 # --------------------------------------------------------------------------- inference
 @torch.no_grad()
-def extend(song, model, stats, strength_db=18.0, blend=1.0, max_gain_db=24.0):
+def extend(song, model, stats, strength_db=18.0, blend=1.0, max_gain_db=40.0):
     """Add the reconstructed 8-16 kHz band to a band-limited song.
 
     `strength_db` is how much the band is raised relative to where it currently
@@ -251,32 +257,69 @@ def extend(song, model, stats, strength_db=18.0, blend=1.0, max_gain_db=24.0):
     pred = np.concatenate(out, axis=1)[0]                  # (T, n_out)
     pred = pred * stats['ysd'] + stats['ymu']              # log10 power, mel
 
-    # mel -> linear by least squares against the filterbank (stable, no inverse
-    # filterbank artefact at the band edges)
-    fb = _FB_OUT                                   # (n_out, bins)
-    target_pow = np.maximum(10 ** (pred.T + strength_db / 10.0), 0.0)   # (n_out, T)
-    # Mel -> linear: solve fb @ X = target for X (least squares, non-negative
-    # clipped). np.linalg.lstsq needs (bins, n_out) here, i.e. the transpose -
-    # passing fb directly raised "incompatible dimensions" because the filterbank
-    # is (n_out, bins) and the right-hand side is (n_out, T).
-    # fb is (n_out, bins); solving fb @ X = target_pow gives X of shape
-    # (bins, T). Passing fb.T instead transposes the problem and numpy rejects it.
-    sol = np.linalg.lstsq(fb, target_pow, rcond=1e-3)[0]                # (bins, T)
-    lin_band = np.maximum(sol, 0.0)
+    # ---- apply a GAIN CURVE, do not invert the mel filterbank ------------
+    #
+    # The first version turned the predicted mel band back into linear bins with
+    # np.linalg.lstsq(fb, target, rcond=1e-3). That is ill-posed: the filterbank is
+    # 24 x 513 and rank-deficient, so the least-squares solution puts the energy in
+    # arbitrary bins while matching only the 24 band sums. Measured consequence: a
+    # black bar at 7.2-8 kHz in the spectrogram and a 20 dB step at the crossover,
+    # and moving the cutoff just moved the step.
+    #
+    # A gain curve has none of those failure modes. For every mel band, take the
+    # ratio of the level the network wants to the level that is actually there;
+    # interpolate that ratio across frequency in dB; limit it; smooth it. The
+    # source's own fine structure and phase survive untouched, and because the
+    # curve is continuous in frequency there is no seam to hear. This is also what
+    # `strength_db` now means: the *ratio* is lifted, not the absolute level, so
+    # the result follows the music instead of imposing a fixed band level.
+    cur_mel = 10 ** logmel(mag, _FB_OUT)                   # (n_out, T), power
+    want_mel = 10 ** (pred.T + strength_db / 10.0)         # (n_out, T)
+    ratio_db = 10 * np.log10((want_mel + 1e-20) / (cur_mel + 1e-20))
+    # never attenuate; the cap has to sit above the largest lift the caller asks
+    # for, otherwise the closed loop in restore.py runs into it and the result
+    # *drops* when it asks for more (measured: -42 dB at a 30 dB request against
+    # -26 dB when the loop was capped at 22).
+    ratio_db = np.clip(ratio_db, 0.0, max_gain_db)
+    # smooth over time and across mel bands so the curve is gentle
+    ratio_db = np.apply_along_axis(lambda v: np.convolve(v, np.ones(5) / 5, 'same'),
+                                   0, ratio_db)
+    ratio_db = np.apply_along_axis(lambda v: np.convolve(v, np.ones(3) / 3, 'same'),
+                                   1, ratio_db)
 
-    # ---- splice: keep everything below the cutoff untouched ---------------
+    # mel band centres -> per-bin gain, in dB, then a smooth cross-fade so the
+    # curve is exactly 1 below xf_lo and reaches full value at f_lo
+    fb = _FB_OUT
+    centres = (fb @ f) / np.maximum(fb.sum(1), 1e-12)      # (n_out,)
+    # Cross-fade over a QUARTER octave, not a full one. Measured with a full
+    # octave (cutoff 8 kHz -> start 4 kHz): 5-8 kHz got lifted by up to +27 dB,
+    # which is brightening the presence region, not reconstructing the top. A
+    # quarter octave (6.7-8 kHz) keeps the transition smooth, which is the point,
+    # without rewriting the band below it.
+    xf_lo = CUT_HZ / 2 ** 0.6
     n_bins = mag.shape[0]
-    f_lo = CUT_HZ
-    f_hi = TOP_HZ
-    idx = (f >= f_lo) & (f < f_hi)
-    newmag = mag.copy()
-    # only raise where the source is below the intended level; never attenuate
-    cur = mag[idx]
-    proposed = np.sqrt(lin_band[idx]) * blend + cur.mean(0, keepdims=True) * 0
-    newmag[idx] = np.maximum(cur, proposed)
-    # soft edge so the splice is not a step
-    edge = (f >= f_lo * 0.9) & (f < f_lo)
-    newmag[edge] = mag[edge]
+    # np.interp only takes a 1-D target, so interpolate a per-frequency weight
+    # matrix once: (n_bins, n_out) says how the mel bands contribute to each bin.
+    Wm = np.zeros((n_bins, len(centres)))
+    for m in range(len(centres)):
+        # linear interpolation kernel between neighbouring mel centres
+        lo = centres[m - 1] if m > 0 else centres[0]
+        hi = centres[m + 1] if m < len(centres) - 1 else centres[-1]
+        Wm[:, m] = np.clip(1.0 - np.abs(f - centres[m]) /
+                           np.maximum(np.minimum(centres[m] - lo, hi - centres[m]), 1e-9),
+                           0.0, 1.0)
+    Wm[Wm.sum(1) == 0] = 1.0
+    Wm /= Wm.sum(1, keepdims=True)
+    g_db = Wm @ ratio_db
+    # Cubic ramp over the transition. Measured with wf^2 and a quarter-octave
+    # transition: the step from the untouched region to full reconstruction was
+    # still 10.6 dB between neighbouring bands at 7.2-8 kHz. The gain has to start
+    # from zero *gradually*, and a cubic does that where a square still leaves a
+    # visible onset.
+    wf = np.clip(np.log2(np.maximum(f, 1e-9) / xf_lo) / np.log2(CUT_HZ / xf_lo), 0.0, 1.0)
+    g_db *= (wf ** 3)[:, None]
+    g_db[f >= TOP_HZ] = 0.0
+    newmag = mag * (10 ** (g_db / 20.0))
 
     y = istft_from_mag_phase(newmag, np.angle(
         sg.stft(np.asarray(song, float).mean(1) if np.ndim(song) > 1 else song,
