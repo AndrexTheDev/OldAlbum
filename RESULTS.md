@@ -1,72 +1,80 @@
 # Ergebnisse — zweiter Durchgang
 
-## Was gegen den abgelehnten ersten Durchgang geändert wurde
+## Was ersetzt wurde
 
-Eine Stufe, aber die entscheidende: **das Bandbreiten-Modell ist ersetzt**. Der
-alte Extender war ein MLP, der die mittlere Pegelhöhe des oberen Bandes gelernt
-hatte (Cross-Song R² −0,19 … +0,42). Das neue Modell ist ein rekurrentes
-adversariales Netz (Cross-Song R² **+0,41 … +0,61**). Details in `BWE.md`, die
-Beweisführung in `FINDINGS.md`.
+Eine Stufe: **das Bandbreiten-Modell**. Der alte Extender war ein MLP, der die
+mittlere Pegelhöhe des oberen Bandes gelernt hatte (Cross-Song R² −0,19 … +0,42).
+Das neue Modell ist ein rekurrentes adversariales Netz. Details in `BWE.md`,
+die Naht-Odyssee in `SEAM.md`, die Diagnose in `FINDINGS.md`.
 
-## Die Zahlen — vorher (abgelehnt) / nachher (neu)
+## Cross-Song-Validierung (das einzige ehrliche Maß)
 
-Oberes Band relativ zum 300–3000-Hz-Band, Median-Frame, gemessen am **fertigen
-Master** (nicht am Zwischenschritt):
+Training auf drei Songs, Messung auf dem vierten:
 
-| Song | 12–16 kHz abgelehnt | **12–16 kHz neu** | Gewinn |
-|---|---|---|---|
-| I Need You | −58,2 dB | **−26,1 dB** | **+32,1 dB** |
-| Lonesome Feeling | −50,2 dB | **−26,0 dB** | **+24,2 dB** |
-| Put It On | −51,7 dB | **−26,0 dB** | **+25,7 dB** |
-| Pussycat | −47,9 dB | **−26,0 dB** | **+21,9 dB** |
-
-Ziel aus `ROADMAP.md` §1 war ≥ −25 dB; erreicht sind −26,0 dB mit Absicht
-1 dB Puffer. **Alle vier Songs liegen jetzt auf demselben Wert** statt 10 dB
-auseinander — das ist der Regelkreis, nicht der Zufall.
-
-| Song | 8–12 kHz | 16–20 kHz | Crest | Stereo-Korr. |
+| Held-out-Song | altes Modell | neu (1024 FFT) | **neu (2048 FFT)** | LSD |
 |---|---|---|---|---|
-| I Need You | −21,1 | −85,4 | 12,9 | 0,961 |
-| Lonesome Feeling | −21,8 | −81,2 | 12,9 | 0,967 |
-| Put It On | −18,7 | −81,3 | 13,4 | 0,962 |
-| Pussycat | −10,0 | −73,7 | 13,8 | 0,960 |
+| I Need You | −0,19 | +0,518 | **+0,727** | 0,34 dB |
+| Lonesome Feeling | −0,19 | +0,405 | — | — |
+| Put It On | −0,13 | +0,545 | **+0,650** | 0,42 dB |
+| Pussycat | −0,006 | +0,612 | — | — |
 
-## Warum das kein Rauschregler ist
+Erstmals deutlich positiv auf allen Songs. Das Fenster von 2048 statt 1024
+Samples war dabei entscheidend: bei 1024 maß das Band 8–16 kHz **−78 dB** gegen
+echte −40 dB, das Netz bekam oberhalb 8 kHz praktisch nichts zu sehen.
 
-Der entscheidende Test ist die **spektrale Flachheit** des oberen Bandes. Eine
-Hiss-Wand hat 0 dB (jedes Bin gleich viel Energie), Musik ist deutlich negativ.
+## Die gelieferten Master
 
-| Song | Flachheit 12–16 kHz | Bedeutung |
+| Song | LUFS | dBTP | 12–16 kHz | Crest | Korr | Clip |
+|---|---|---|---|---|---|---|
+| I Need You | −12,00 | −1,00 | −26,1 | 12,8 | 0,9618 | 0 |
+| Lonesome Feeling | −12,00 | −1,10 | −25,6 | 13,1 | 0,9666 | 0 |
+| Put It On | −12,00 | −1,10 | −26,0 | 13,3 | 0,9616 | 0 |
+| Pussycat | −12,00 | −1,00 | −26,0 | 14,2 | 0,9631 | 0 |
+
+Ziel ≥ −25 dB im oberen Band; erreicht −25,6 … −26,1.
+
+## Ist es besser als der abgelehnte Durchgang?
+
+Ehrliche Antwort: **im Bandpegel gleich, in der Qualität des Bandes besser.**
+
+| Song | 12–16 kHz alt → neu | Flachheit alt → neu |
 |---|---|---|
-| I Need You | −3,8 dB | tonal |
-| Lonesome Feeling | −3,1 dB | tonal |
-| Put It On | −3,3 dB | tonal |
-| Pussycat | −4,3 dB | tonal |
+| I Need You | −26,1 → −26,1 | −3,8 → **−5,3** |
+| Lonesome Feeling | −26,0 → −25,6 | −3,1 → −5,0 |
+| Put It On | −26,0 → −26,0 | −3,3 → −5,5 |
+| Pussycat | −26,0 → −26,0 | −4,3 → −6,4 |
 
-Zum Vergleich: die abgelehnten Master lagen bei −3,6 … −5,0 dB, also **ähnlich
-tonal** — der neue Master ist nicht flacher, nur lauter. Und die spektrale
-Rauheit bleibt unverändert (0,47 → 0,46 dB), es kommt also keine Härte dazu.
+Die **Flachheit** ist der Unterschied. Eine Hiss-Wand hat 0 dB, Musik ist deutlich
+negativ. Der alte Master lag bei −3,1 … −4,3 dB, der neue bei −5,0 … −6,4 dB,
+die **Quelle** bei −5,8 dB. Der neue Höhenbereich ist also tonal und trifft die
+Charakteristik des Originals; der alte war rauschiger.
 
-## Was sich *nicht* geändert hat, und warum das so bleibt
+Zusätzlich, gemessen direkt nach der BWE (vor dem Mastering):
+
+| | Kopplung Höhen ↔ Gesamtenergie |
+|---|---|
+| Quelle | 0,311 |
+| nach BWE | **0,326** |
+| nach Mastering | 0,212 |
+
+Das rekonstruierte Band folgt den Anschlägen **besser als die Quelle selbst**.
+Der Verlust auf 0,212 entsteht erst im Limiter — der Loudness-Druck glättet
+zwangsläufig. Das ist eine Eigenschaft des Masters, nicht der Restaurierung.
+
+## Was sich nicht geändert hat
 
 | Achse | Wert | Ziel | Status |
 |---|---|---|---|
 | Raum (dB/s) | −34,8 … −48,5 | −250 … −400 | **nicht bearbeitbar** |
 | 16–20 kHz | −74 … −85 dB | — | bewusst nicht synthetisiert |
-| Dynamik (Block-std) | 8–10 dB | 8–14 | **war schon im Ziel** |
-| Clipping | 0 | 0 | erreicht |
-
-Der Raum bleibt. Das ist die dokumentierte Grenze: fünf Verfahren gebaut und
-gemessen, der Oracle-Test zeigt, dass spektrale Subtraktion bei diesem
-Hallpegel nicht trennt, und die gelernten Modelle liegen auf nicht erreichbaren
-Hosts. Alles darüber steht in `STATUS.md` und `FINDINGS.md`.
+| Dynamik (Block-std) | 8–10 dB | 8–14 | war schon im Ziel |
+| Clipping | 0 in allen vier | 0 | erreicht |
 
 ## Die Stellschraube
 
 `strength_db` in `work/restore.py` → `air_bwe2()`. Gemessen: **exakt 1 dB
-Bandanstieg pro dB Einstellung**, auf allen vier Songs (Tabelle in `BWE.md`).
+Bandanstieg pro dB Einstellung**, linear über 14–30 dB, auf allen vier Songs.
 Der Regelkreis sucht die Einstellung pro Song selbst, bis der fertige Master
-−26,0 dB trifft, und braucht dafür zwei Durchläufe.
+−26 dB trifft — 1–2 Durchläufe.
 
-Wer mehr will: `target_db` auf −20 setzen. Wer weniger will: −32. Der Bereich
-4–30 dB ist kalibriert und frei von Clipping-Artefakten.
+Wer mehr will: `target_db` auf −20 setzen. Wer weniger will: −32.
