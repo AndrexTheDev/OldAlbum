@@ -98,3 +98,60 @@ Der ehrliche Kompromiss: **entweder** man nimmt das Rauschen in Kauf und bekommt
 Höhen, **oder** man bleibt nahe an der Quelle und bekommt weniger Höhen. Die
 Stellschraube dafür ist `snr_soft_db` und die Anhebung in dB — beide sind jetzt
 Parameter, nicht Konstanten.
+
+---
+
+# Die Korrektur, zweiter Anlauf — und der Preis
+
+## Was eingebaut wurde
+
+1. **Per-Bin-Rausch-Gate** in `bwe2.extend()`: Rauschboden pro Frequenzbin als
+   20. Perzentil über die Zeit, Verstärkung fällt darunter auf null, weicher
+   Übergang (`snr_soft_db`).
+2. **Relative statt absolute Anhebung**: `lift_db` statt `target_db`. Jeder Song
+   behält seinen Charakter.
+3. **Die separate Rauschunterdrückung entfernt.** `spectral_noise_cut` lief mit
+   −12 dB ab 6,8 kHz und zwang den Regelkreis, doppelt so viel Verstärkung zu
+   verlangen — wodurch das Gate mehr Rauschen durchließ. Gemessen an Song 2:
+   −21,2 dB Rauschen mit dem Schnitt, −24,0 dB ohne. Ein Mechanismus, eine
+   Aufgabe.
+
+## Der Preis, ehrlich benannt
+
+Gemessen an Song 1 und 2, jeweils Pegel im Oberband gegen Rauschen in den Pausen:
+
+| Anhebung | Höhengewinn | Rauschen über Quelle |
+|---|---|---|
+| 4 dB | +5,6 … 6,4 dB | +6,2 … 8,4 dB |
+| 7 dB | +6,7 … 8,1 | +7,7 … 10,6 |
+| 14 dB | +9,5 … 12,2 | +9,2 … 13,7 |
+
+**Das Verhältnis ist fast 1:1.** Jeder dB Höhen kostet einen dB Rauschen. Das ist
+kein Implementierungsfehler, sondern die Physik dieser Quelle: das Oberband
+besteht überwiegend aus Rauschen, also verstärkt jede lineare Anhebung beides
+gleich.
+
+Zwei Versuche, das zu umgehen, sind gemessen und gescheitert:
+
+* **Weiche Wiener-Maske im Oberband** (spektrale Subtraktion des Rauschbodens):
+  wirkungslos. Rauschpegel −22,2 dB bei Faktor 1, 2 und 4 — identisch. Derselbe
+  Grund wie beim gescheiterten Dereverb: das STFT-Fenster trennt Rauschen und
+  Signal bei diesem Material nicht.
+* **Stärkeres Gate**: 96 % der Bandenergie liegen über dem 20.-Perzentil-Boden.
+  Ein höherer Faktor schneidet die Musik mit.
+
+## Der eingestellte Kompromiss: `lift_db = 8`
+
+| Song | Rauschen Quelle | **ausgeliefert** | **jetzt** | Verbesserung | Höhengewinn |
+|---|---|---|---|---|---|
+| I Need You | −36,1 | −11,4 | **−30,7** | **19,3 dB** | +5,0 dB |
+| Lonesome Feeling | −34,1 | −18,1 | **−25,8** | **7,8 dB** | +6,7 dB |
+| Put It On | −24,2 | −5,9 | **−13,1** | **7,2 dB** | +5,3 dB |
+| Pussycat | −23,2 | −3,2 | **−14,3** | **11,1 dB** | +8,7 dB |
+
+Song 1 liegt mit −30,7 dB nur noch 5,4 dB über der Quelle. Die Songs 3 und 4
+bleiben 9–11 dB über ihrer Quelle — dort ist das Oberband der Quelle selbst schon
+laut (−24 dB), und jedes Anheben verstärkt zwangsläufig mit.
+
+Wer mehr Höhen will, stellt `lift_db` höher (10–14). Wer weniger Rauschen will,
+niedriger (4–6). Beide Richtungen sind kalibriert und gemessen.

@@ -336,20 +336,28 @@ def _band_level_db(x, lo, hi, sr=SR):
     return float(10 * np.log10(np.median(W[:, (f >= lo) & (f < hi)].sum(1)) / ref + 1e-30))
 
 
-def air_bwe2(st, sr=SR, strength_db=None, target_db=_TARGET_8_12_DB,
-             lo=12.0, hi=16.0, snr_soft_db=21.0, noise_gate_db=6.0):
-    """Reconstruct the top two octaves with the recurrent adversarial network.
+def air_bwe2(st, sr=SR, strength_db=None, lift_db=8.0,
+             lo=8.0, hi=14.0, snr_soft_db=21.0, noise_gate_db=6.0):
+    """Lift the upper band RELATIVE to where it already sits.
 
     Replaces the per-instrument band-matrix model (`bwe.neural_air_stereo`), which
     scored R2 -0.19..+0.42 across songs and learned the average band level rather
-    than its structure. `bwe2` scores +0.41..+0.61 on the same split - see BWE.md.
+    than its structure.
 
-    The strength is chosen per song by measurement, not by ear: the network's lift
-    maps 1:1 onto both octaves (BWE.md, table), so the setting is simply the
-    distance from where the band currently sits to `target_db`. That keeps the
-    four masters at a consistent brightness instead of applying one number that
-    happens to suit song 1 and over-brightens song 4, whose top octave is 13 dB
-    higher to begin with.
+    **Why the target is relative and not a fixed number of dB.** The previous
+    version drove the band to an absolute target of -26 dB relative to the mid
+    band, derived from a modern reference mix. Measured on the delivered masters,
+    that produced between -3.2 and -18.1 dB of upper band in the pauses, against
+    -23 to -36 dB in the sources - a hiss wall, and the reason the delivery was
+    rejected (HISS.md). The target itself was the bug: the four sources do not
+    share one brightness. Song 4's upper band sits 13 dB higher than song 1's
+    because that is how it was recorded, and forcing both onto one number means
+    over-brightening song 4 and drowning it in its own codec noise.
+
+    So `lift_db` is how much the band is raised above its *current* level. Each
+    song keeps its character; all four gain the same amount of definition. The
+    measured mapping is exactly 1 dB per dB, so the loop below converges in one
+    or two iterations.
 
     Applied to the mid channel only and added to both, so the result stays
     mono-compatible by construction.
@@ -364,16 +372,10 @@ def air_bwe2(st, sr=SR, strength_db=None, target_db=_TARGET_8_12_DB,
     y = np.asarray(st, dtype=np.float32)
     mid = y.mean(axis=1)
     cur = _band_level_db(mid, int(lo * 1000), int(hi * 1000), sr)
+    # the level the band must END at: its own level plus the requested lift
+    want = None if cur is None else cur + lift_db
     if strength_db is None:
-        # Measured calibration (BWE.md): the network's lift is exactly 1 dB per dB
-        # of `strength_db` on all four sources, so the setting is simply the gap
-        # to the target - no iteration needed. The 22 dB cap is deliberate: it
-        # keeps the quietest top octave (song 1, -51.7 dB) from being boosted far
-        # enough to expose codec artefacts that sit just above its music.
-        if cur is None:
-            strength_db = 12.0
-        else:
-            strength_db = float(np.clip(target_db - cur, 8.0, 22.0))
+        strength_db = 12.0
     # ---- closed loop, because the open-loop calibration is not enough ---------
     # The 1 dB-per-dB law was measured on the *raw* signal, but this stage sits
     # after separation, the separation correction, the voicing curve and the
@@ -392,13 +394,14 @@ def air_bwe2(st, sr=SR, strength_db=None, target_db=_TARGET_8_12_DB,
         add = (np.asarray(r, dtype=np.float32) - mid.astype(np.float32))
         got = _band_level_db((mid + add), int(lo * 1000), int(hi * 1000), sr)
         hist.append(round(got, 1) if got is not None else None)
-        if got is None:
+        if got is None or want is None:
             break
-        resid = target_db - got
+        resid = want - got
         if abs(resid) < 0.5:
             break
-        strength_db = float(np.clip(strength_db + resid, 4.0, 38.0))
+        strength_db = float(np.clip(strength_db + resid, 2.0, 40.0))
     return (y + add[:, None]).astype(np.float32), {
+        'lift_db': lift_db,
         'strength_db': round(strength_db, 2),
         'before_db': None if cur is None else round(cur, 1),
         'after_db': hist[-1], 'iterations': len(hist)}
@@ -566,9 +569,14 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
     # no matter where the crossover was placed or how wide the ramp was made.
     # The band's own level is set by the continuous gain curve in bwe2 alone, so
     # there is nothing to carve out first.
-    st = dsp.spectral_noise_cut(st, SR, cut_hz=16000.0, smooth_oct=0.5,
-                                amount_db=rec.get('air_noise_cut_db', -6.0))
-    st, air_info = air_bwe2(st, SR, target_db=rec.get('air_target_db', -26.0))
+    # The separate noise cut is gone. It used to run at -12 dB from 6.8 / 8 kHz
+    # upwards, which meant the closed loop in air_bwe2 had to demand roughly twice
+    # the gain to reach its target - and the per-bin gate inside bwe2 then let more
+    # of the residual noise through, because the SNR it measures had been degraded
+    # by the cut. Measured on song 2: hiss in the pauses -21.2 dB with the cut,
+    # -24.0 dB without it. The gate in bwe2 is the noise control now; one mechanism
+    # doing one job beats two mechanisms fighting each other.
+    st, air_info = air_bwe2(st, SR, lift_db=rec.get('air_lift_db', 8.0))
     info['air'] = air_info
     stage(st, 'B7_air')
 
