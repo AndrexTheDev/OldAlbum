@@ -20,6 +20,8 @@ sys.path.insert(0, '/home/user/OldAlbum/work')
 import dsp
 import image
 import bwe
+import bwe2
+import torch
 from dsp import (db, rms_db, peak_db, declick, decrackle, denoise, remove_hum,
                  block_dc_subsonic, eq_curve, compress, limiter, harmonic_excite,
                  haas_width, loudness, true_peak_db)
@@ -313,6 +315,94 @@ def neural_air_stereo(st, nm, amount=1.0, hp_hz=6800.0, sr=SR):
     return (y + r[:, None]).astype(np.float32)
 
 
+
+# ------------------------------------------------------- bwe2 (validated BWE)
+_BWE2 = {}
+_TARGET_8_12_DB = -26.0     # wanted level of 12-16 kHz vs. the 300-3 kHz reference
+
+
+def _band_level_db(x, lo, hi, sr=SR):
+    """Level of one band relative to the 300 Hz - 3 kHz reference, median frame."""
+    m = np.asarray(x, dtype=np.float64)
+    m = m.mean(1) if m.ndim > 1 else m
+    n = 8192
+    k = len(m) // n * n
+    if k < n:
+        return None
+    fr = m[:k].reshape(-1, n)
+    W = np.abs(np.fft.rfft(fr * np.hanning(n), axis=1)) ** 2
+    f = np.fft.rfftfreq(n, 1 / sr)
+    ref = np.median(W[:, (f > 300) & (f < 3000)].sum(1))
+    return float(10 * np.log10(np.median(W[:, (f >= lo) & (f < hi)].sum(1)) / ref + 1e-30))
+
+
+def air_bwe2(st, sr=SR, strength_db=None, target_db=_TARGET_8_12_DB,
+             lo=12.0, hi=16.0):
+    """Reconstruct the top two octaves with the recurrent adversarial network.
+
+    Replaces the per-instrument band-matrix model (`bwe.neural_air_stereo`), which
+    scored R2 -0.19..+0.42 across songs and learned the average band level rather
+    than its structure. `bwe2` scores +0.41..+0.61 on the same split - see BWE.md.
+
+    The strength is chosen per song by measurement, not by ear: the network's lift
+    maps 1:1 onto both octaves (BWE.md, table), so the setting is simply the
+    distance from where the band currently sits to `target_db`. That keeps the
+    four masters at a consistent brightness instead of applying one number that
+    happens to suit song 1 and over-brightens song 4, whose top octave is 13 dB
+    higher to begin with.
+
+    Applied to the mid channel only and added to both, so the result stays
+    mono-compatible by construction.
+    """
+    if not _BWE2:
+        ck = torch.load(f'{ROOT}/work/models/bwe2.pt', weights_only=False)
+        net = bwe2.BWE()
+        net.load_state_dict(ck['state'])
+        net.eval()
+        _BWE2['net'] = net
+        _BWE2['stats'] = ck['stats']
+    y = np.asarray(st, dtype=np.float32)
+    mid = y.mean(axis=1)
+    cur = _band_level_db(mid, int(lo * 1000), int(hi * 1000), sr)
+    if strength_db is None:
+        # Measured calibration (BWE.md): the network's lift is exactly 1 dB per dB
+        # of `strength_db` on all four sources, so the setting is simply the gap
+        # to the target - no iteration needed. The 22 dB cap is deliberate: it
+        # keeps the quietest top octave (song 1, -51.7 dB) from being boosted far
+        # enough to expose codec artefacts that sit just above its music.
+        if cur is None:
+            strength_db = 12.0
+        else:
+            strength_db = float(np.clip(target_db - cur, 8.0, 22.0))
+    # ---- closed loop, because the open-loop calibration is not enough ---------
+    # The 1 dB-per-dB law was measured on the *raw* signal, but this stage sits
+    # after separation, the separation correction, the voicing curve and the
+    # denoiser, and those shift the band reference. Measured open-loop, the four
+    # finished masters came out at -20.0 / -21.6 / -28.0 / -31.3 dB against a
+    # -26 dB target: right on average, 11 dB apart. So: apply, measure the actual
+    # 12-16 kHz level of the staged result, and correct once. One correction is
+    # enough because the law is exactly 1:1, and the loop stops when the residual
+    # is under 0.5 dB.
+    add = None
+    hist = []
+    for _ in range(4):
+        r = bwe2.extend(mid.astype(np.float32), _BWE2['net'], _BWE2['stats'],
+                        strength_db=strength_db)
+        add = (np.asarray(r, dtype=np.float32) - mid.astype(np.float32))
+        got = _band_level_db((mid + add), int(lo * 1000), int(hi * 1000), sr)
+        hist.append(round(got, 1) if got is not None else None)
+        if got is None:
+            break
+        resid = target_db - got
+        if abs(resid) < 0.5:
+            break
+        strength_db = float(np.clip(strength_db + resid, 4.0, 30.0))
+    return (y + add[:, None]).astype(np.float32), {
+        'strength_db': round(strength_db, 2),
+        'before_db': None if cur is None else round(cur, 1),
+        'after_db': hist[-1], 'iterations': len(hist)}
+
+
 # ---------------------------------------------------------------- main
 def restore_song(tag, out_dir, rec=None, verbose=True):
     rec = rec or RECIPES[tag]
@@ -450,8 +540,8 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
     # instead of stacking on top of it.
     st = dsp.spectral_noise_cut(st, SR, cut_hz=8000.0,
                                 amount_db=rec.get('air_noise_cut_db', -12.0))
-    st = neural_air_stereo(st, 'master', amount=rec.get('air_master', 0.3),
-                           hp_hz=rec.get('air_from_hz', 5700.0))
+    st, air_info = air_bwe2(st, SR, target_db=rec.get('air_target_db', -26.0))
+    info['air'] = air_info
     stage(st, 'B7_air')
 
     # =========================================================== LIMIT + NORMALISE
