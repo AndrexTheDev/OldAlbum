@@ -337,7 +337,8 @@ def _band_level_db(x, lo, hi, sr=SR):
 
 
 def air_bwe2(st, sr=SR, strength_db=None, lift_db=8.0,
-             lo=8.0, hi=14.0, snr_soft_db=21.0, noise_gate_db=6.0):
+             lo=8.0, hi=14.0, snr_soft_db=21.0, noise_gate_db=6.0,
+             abs_floor_db=45.0):
     """Lift the upper band RELATIVE to where it already sits.
 
     Replaces the per-instrument band-matrix model (`bwe.neural_air_stereo`), which
@@ -390,7 +391,7 @@ def air_bwe2(st, sr=SR, strength_db=None, lift_db=8.0,
     for _ in range(6):
         r = bwe2.extend(mid.astype(np.float32), _BWE2['net'], _BWE2['stats'],
                         strength_db=strength_db, noise_gate_db=noise_gate_db,
-                        snr_soft_db=snr_soft_db)
+                        snr_soft_db=snr_soft_db, abs_floor_db=abs_floor_db)
         add = (np.asarray(r, dtype=np.float32) - mid.astype(np.float32))
         got = _band_level_db((mid + add), int(lo * 1000), int(hi * 1000), sr)
         hist.append(round(got, 1) if got is not None else None)
@@ -472,6 +473,29 @@ def restore_song(tag, out_dir, rec=None, verbose=True):
     core = (core * (10 ** (gain / 20.0))).astype(np.float32)
     info['balance_gain_db'] = round(gain, 2)
     stage(core, 'B1_sum')
+
+    # =========================================================== BUS: kill the
+    # separator's out-of-band garbage
+    #
+    # Demucs does not output silence above the source's bandwidth - it outputs its
+    # own numerical residue, and the amount is not small. Measured on song 1:
+    #
+    #   source                   -107.0 dB   (above 16 kHz, rel. 300-3000)
+    #   sum of the four stems     -62.0 dB   -> +45 dB invented by the separator
+    #     vocals -68.2 / drums -47.9 / bass -42.7 / other -59.0
+    #
+    # The lowest of those, the bass stem at -42.7 dB, is the worst offender: the
+    # separator confidently places broadband energy in a band where the source has
+    # nothing at all. Everything downstream then treats it as signal - the air
+    # stage lifts it another 25 dB and the limiter brings it forward.
+    #
+    # The source is at digital zero above 15.8 kHz (AAC-LC cutoff), so a brickwall
+    # at 16 kHz at the point where the stems are summed removes the artefact and
+    # nothing else. It has to happen BEFORE the air stage, because that stage is
+    # designed to add energy in exactly this region.
+    _b, _a = sg.butter(16, 15200.0 / (SR / 2), 'low')
+    core = sg.filtfilt(_b, _a, core).astype(np.float32)
+    stage(core, 'B1b_sep_lowpass')
 
     # =========================================================== BUS: noise
     # One denoiser for the whole programme. Minimum statistics over the full mix

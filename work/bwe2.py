@@ -240,7 +240,8 @@ def train_bwe(songs, val_song, epochs=60, win=64, batch=32, lr=2e-3, adv_w=0.05,
 # --------------------------------------------------------------------------- inference
 @torch.no_grad()
 def extend(song, model, stats, strength_db=18.0, blend=1.0, max_gain_db=40.0,
-           noise_gate_db=6.0, snr_soft_db=9.0, min_gate=0.0):
+           noise_gate_db=6.0, snr_soft_db=9.0, min_gate=0.0,
+           abs_floor_db=45.0):
     """Add the reconstructed 8-16 kHz band to a band-limited song.
 
     `strength_db` is how much the band is raised relative to where it currently
@@ -303,6 +304,31 @@ def extend(song, model, stats, strength_db=18.0, blend=1.0, max_gain_db=40.0,
         gate = np.clip(snr_db_bin / max(snr_soft_db, 1e-6), 0.0, 1.0)
         gate = gate ** 2                       # gentle onset, keeps transients
         gate = np.maximum(gate, min_gate)
+
+        # ---- ABSOLUTE floor as well, and this one is not optional ----------
+        # A purely relative gate fails in the digital silence above the codec's
+        # cutoff. There the signal is at -85 dBFS, but the *relative* SNR between
+        # one bin's noise and that bin's own 20th percentile is still large, so the
+        # relative gate opens and the network amplifies numerical dust.
+        #
+        # Measured on song 1 before this check: the source sits at -83 / -89 dB in
+        # 15.8-20 kHz, the master came out at -46 / -60 dB. That is +30 to +38 dB
+        # invented from nothing - an audible hiss shelf on top of the real band,
+        # and the last source of noise in the delivery.
+        #
+        # So: anything more than `abs_floor_db` below the programme's own median
+        # bin level is treated as silence, whatever its local SNR says.
+        if abs_floor_db is not None:
+            # Reference is the median of the MUSIC band (300 Hz - 8 kHz), not of
+            # all bins. The all-bin median is dominated by the thousands of bins
+            # above the codec cutoff, which sit at -110 dBFS; measured on song 1
+            # that median was -94.9 dBFS, so 16-20 kHz came out only 61 dB below
+            # it and passed a 70 dB threshold that was meant to stop exactly that.
+            ref_sel = (f >= 300.0) & (f < CUT_HZ)
+            ref = float(np.median(mag[ref_sel])) if ref_sel.any() else float(np.median(mag))
+            below = 20 * np.log10((mag + 1e-20) / (ref + 1e-20))
+            abs_gate = np.clip((below + abs_floor_db) / 6.0, 0.0, 1.0)
+            gate = gate * abs_gate
     else:
         gate = None
 
